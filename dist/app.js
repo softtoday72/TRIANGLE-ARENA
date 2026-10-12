@@ -14,7 +14,7 @@
   // localId is the pilot this browser controls; everything "mine" on screen is looked up through it.
   const state={screen:'setup',run:null,battle:null,localId:0,particles:[],raf:0,last:0,resultTimer:0,paused:false,useItemQueued:false,keys:new Set()};
   // While net.room is set the server owns the run and the battle; this client only sends intent and draws what it is told.
-  const net={ws:null,room:null,phase:null,error:null,invite:[],sentInput:'',snapAt:0};
+  const net={ws:null,room:null,phase:null,error:null,invite:[],sentInput:'',snapAt:0,tick:1/60,seq:0,inputs:[],base:null,ex:0,ey:0,angle:null};
   const online=()=>!!net.room,isHost=()=>online()&&net.room.hostId===net.room.you;
   const netSend=m=>{if(net.ws&&net.ws.readyState===1)net.ws.send(JSON.stringify(m));};
   const localPilot=()=>state.run.pilots[state.localId], localCraft=()=>state.battle.crafts[state.localId];
@@ -126,7 +126,7 @@
     if(navigator.clipboard)navigator.clipboard.writeText(box.value).then(done,()=>box.select());else{box.select();if(document.execCommand('copy'))done();}
   }
   function onRoom(m){
-    const prev=net.phase;net.room=m;net.phase=m.phase;
+    const prev=net.phase;net.room=m;net.phase=m.phase;net.tick=1/m.hz;
     if(m.run){m.run.maxRounds=m.run.infinite?Infinity:m.run.maxRounds;state.run=m.run;state.localId=m.pilotId;state.run.pilots.forEach(p=>p.color=pickColor(p.id));}
     if(m.phase==='lobby'){
       // A finished run leaves its summary on screen until the player dismisses it.
@@ -138,25 +138,56 @@
       if(prev!=='result')state.resultTimer=setTimeout(()=>{renderResults();show('resultScreen');},850);else if(state.screen==='resultScreen')renderResults();
     }else if(m.phase==='final')showFinal();
   }
-  function beginOnlineBattle(){state.battle=null;state.particles=[];net.sentInput='';state.paused=false;$('#pauseModal').classList.remove('active');$('#countdown').textContent='';show('gameScreen');canvas.focus();state.last=performance.now();cancelAnimationFrame(state.raf);state.raf=requestAnimationFrame(loop);}
+  function beginOnlineBattle(){state.battle=null;state.particles=[];net.sentInput='';net.seq=0;net.inputs=[{s:0,vx:0,vy:0,t:performance.now()}];net.base=null;net.ex=net.ey=0;net.angle=null;state.paused=false;$('#pauseModal').classList.remove('active');$('#countdown').textContent='';show('gameScreen');canvas.focus();state.last=performance.now();cancelAnimationFrame(state.raf);state.raf=requestAnimationFrame(loop);}
   // Rebuilds a battle object shaped like the core's, so drawing and the HUD work the same in both modes.
   function onSnapshot(m){
-    if(net.phase!=='battle'||!state.run)return;const run=state.run,me=localPilot();
+    if(net.phase!=='battle'||!state.run)return;const run=state.run,me=localPilot(),now=performance.now();
+    const before=net.base?predictSelf(now):null;
     [me.money,me.weapon,me.item,me.itemCharges]=m.me;
     state.battle={started:m.st,ended:m.en,timeLeft:m.tl,countdown:m.cd,bountyIds:new Set(m.bo),winnerIds:[],resultRows:[],
       crafts:m.c.map((c,i)=>({pilot:run.pilots[i],alive:!!c.al,hidden:!!c.hid,sx:c.x,sy:c.y,x:c.x,y:c.y,vx:c.vx||0,vy:c.vy||0,angle:c.a||0,r:CFG.craft.radius,hp:c.hp||0,maxHp:run.settings.maxHp,shield:c.sh||0,cloak:c.ck?1:0})),
       bullets:m.b.map(([x,y,vx,vy,k])=>{const type=WEAPON_KEYS[k];return{sx:x,sy:y,x,y,vx,vy,type,r:type==='heavy'?7:type==='homing'?5:4};}),
       lasers:m.l.map(([x,y,angle,active])=>({x,y,angle,active:!!active})),
       mines:m.m.map(([x,y])=>({x,y,team:me.team}))};
-    net.snapAt=performance.now();m.ev.forEach(sparkEvent);
+    net.snapAt=now;m.ev.forEach(sparkEvent);rebasePrediction(m,now,before);
   }
-  function sendInput(){const c=playerCommand(),d=c.move?((Math.round(c.angle/(Math.PI/4))%8)+8)%8:-1,sig=`${d}${c.fire?'f':''}`;if(sig===net.sentInput)return;net.sentInput=sig;netSend({t:'input',d,f:c.fire});}
+  // ---- local prediction ----
+  // The server only reports where this craft was a round trip ago. To make it answer the keys at once, the client keeps
+  // every input the server has not finished applying and replays them on top of the newest authoritative position.
+  function predictSelf(now){
+    const log=net.inputs,r=CFG.craft.radius;let{x,y}=net.base;
+    for(let i=0;i<log.length;i++){
+      // The oldest entry is the one the server acknowledged; the part it already simulated is in the base position.
+      let dur=((i+1<log.length?log[i+1].t:now)-log[i].t)/1000;if(i===0)dur-=net.base.n*net.tick;
+      if(dur<=0)continue;dur=Math.min(dur,.5);x=clamp(x+log[i].vx*dur,r,1200-r);y=clamp(y+log[i].vy*dur,r,800-r);
+    }
+    return{x,y};
+  }
+  function rebasePrediction(m,now,before){
+    const b=state.battle,me=b.crafts[state.localId],[ack,applied]=m.k,log=net.inputs;
+    while(log.length>1&&log[0].s<ack)log.shift();
+    // An input held while the server was not simulating this craft (countdown) has not really been running that long.
+    if(now-log[0].t-applied*net.tick*1000>400)log[0].t=now-applied*net.tick*1000;
+    if(!me.alive||!b.started||b.ended){net.base=null;net.ex=net.ey=0;return;}
+    net.base={x:me.sx,y:me.sy,n:applied};
+    // Whatever the new snapshot disagrees with is kept as an offset and faded out, so corrections never show as a jump.
+    if(before){const after=predictSelf(now);net.ex+=before.x-after.x;net.ey+=before.y-after.y;if(Math.hypot(net.ex,net.ey)>80)net.ex=net.ey=0;}
+  }
+  function applyPrediction(dt){
+    const b=state.battle,me=b.crafts[state.localId];if(!net.base||!me.alive)return;
+    const p=predictSelf(performance.now()),fade=Math.exp(-dt*12);net.ex*=fade;net.ey*=fade;
+    me.x=p.x+net.ex;me.y=p.y+net.ey;if(net.angle!==null)me.angle=net.angle;
+    // Other crafts are not predicted, so just refuse to draw this one inside them.
+    for(const o of b.crafts){if(o===me||!o.alive||o.hidden)continue;const dx=me.x-o.x,dy=me.y-o.y,d=Math.hypot(dx,dy)||.001,over=me.r+o.r-d;if(over>0){me.x+=dx/d*over;me.y+=dy/d*over;}}
+  }
+  function sendInput(){const c=playerCommand(),d=c.move?((Math.round(c.angle/(Math.PI/4))%8)+8)%8:-1,sig=`${d}${c.fire?'f':''}`;if(sig===net.sentInput)return;net.sentInput=sig;const a=d*Math.PI/4,v=d<0?0:CFG.craft.speed;if(d>=0)net.angle=a;net.inputs.push({s:++net.seq,vx:Math.cos(a)*v,vy:Math.sin(a)*v,t:performance.now()});netSend({t:'input',s:net.seq,d,f:c.fire});}
   function updateOnline(dt){
     sendInput();const b=state.battle;if(!b)return;
     // Snapshots arrive at half the simulation rate; coast everything along its last known velocity in between.
     const age=b.started&&!b.ended?Math.min(.1,(performance.now()-net.snapAt)/1000):0;
     for(const c of b.crafts)if(c.alive&&!c.hidden){c.x=clamp(c.sx+c.vx*age,c.r,1200-c.r);c.y=clamp(c.sy+c.vy*age,c.r,800-c.r);}
     for(const s of b.bullets){s.x=s.sx+s.vx*age;s.y=s.sy+s.vy*age;}
+    applyPrediction(dt);
     $('#countdown').textContent=b.started?'':b.countdown>0?Math.ceil(b.countdown):'FIGHT';
     if(b.started&&!b.ended)updateParticles(dt);updateHUD();
   }

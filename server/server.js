@@ -9,7 +9,7 @@ const { createCore } = require('../dist/game-core.js');
 
 const core = createCore({ config, weapons, items });
 const PORT = +process.env.PORT || 3000, DIST = path.join(__dirname, '..', 'dist');
-const PROTOCOL = 1, MAX_CRAFTS = 8, TICK = 1 / 60, SNAPSHOT_EVERY = 2, PING_MS = 25000;
+const PROTOCOL = 1, MAX_CRAFTS = 8, TICK_HZ = 60, TICK = 1 / TICK_HZ, SNAPSHOT_EVERY = 2, PING_MS = 25000;
 const WEAPON_KEYS = Object.keys(weapons);
 const MIME = { '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8', '.css': 'text/css; charset=utf-8' };
 const r1 = v => Math.round(v * 10) / 10;
@@ -61,7 +61,7 @@ function publicRun() {
 }
 
 function broadcastRoom() {
-  const base = { t: 'room', phase: room.phase, hostId: room.players[0]?.cid ?? null, settings: room.settings, run: publicRun(), result: room.result,
+  const base = { t: 'room', hz: TICK_HZ, phase: room.phase, hostId: room.players[0]?.cid ?? null, settings: room.settings, run: publicRun(), result: room.result,
     players: room.players.map(p => ({ cid: p.cid, name: p.name, ready: p.ready, pilotId: p.pilotId })) };
   for (const p of room.players) send(p.ws, { ...base, you: p.cid, pilotId: p.pilotId });
 }
@@ -89,7 +89,7 @@ function enterShop() {
 
 function startBattle() {
   room.battle = core.startBattle(room.run); room.phase = 'battle'; room.tick = 0; room.events = [];
-  for (const p of room.players) { p.ready = false; p.cmd = { angle: null, move: false, fire: false }; p.useItem = false; }
+  for (const p of room.players) { p.ready = false; p.cmd = { angle: null, move: false, fire: false }; p.useItem = false; p.seq = 0; p.applied = 0; }
   broadcastRoom();
   // setInterval is too coarse to trust for pacing, so real elapsed time is fed through an accumulator.
   let last = performance.now(), acc = 0;
@@ -102,7 +102,9 @@ function startBattle() {
 function tick() {
   const battle = room.battle, commands = {};
   for (const p of room.players) { commands[p.pilotId] = { ...p.cmd, useItem: p.useItem }; p.useItem = false; }
-  core.step(battle, TICK, commands);
+  const fought = core.step(battle, TICK, commands);
+  // Lets each client work out how much of its latest input this state already contains (see sendSnapshots).
+  if (fought) for (const p of room.players) if (battle.crafts[p.pilotId].alive) p.applied++;
   room.events.push(...battle.events); battle.events.length = 0; room.tick++;
   if (battle.ended || room.tick % SNAPSHOT_EVERY === 0) sendSnapshots();
   if (battle.ended) finishBattle();
@@ -119,6 +121,8 @@ function sendSnapshots() {
     const me = room.run.pilots[p.pilotId];
     send(p.ws, { ...base,
       me: [me.money, me.weapon, me.item, me.itemCharges],
+      // Newest input received from this player, and how many ticks it has been simulated for.
+      k: [p.seq, p.applied],
       c: b.crafts.map(c => !c.alive ? { al: 0 } : c.cloak > 0 && c.pilot.team !== me.team ? { al: 1, ck: 1, hid: 1 } : { al: 1, x: r1(c.x), y: r1(c.y), vx: r1(c.vx), vy: r1(c.vy), a: c.angle, hp: c.hp, sh: c.shield, ck: c.cloak > 0 ? 1 : 0 }),
       m: b.mines.filter(m => m.team === me.team).map(m => [r1(m.x), r1(m.y)]) });
   }
@@ -159,7 +163,7 @@ wss.on('connection', ws => {
       case 'start': if (host && room.phase === 'lobby') startRun(); break;
       case 'buy': if (room.phase === 'shop' && core.buy(room.run, player.pilotId, m.kind, m.key)) broadcastRoom(); break;
       case 'ready': if ((room.phase === 'shop' || room.phase === 'result') && !player.ready) { player.ready = true; broadcastRoom(); everyoneReady(); } break;
-      case 'input': if (room.phase === 'battle') { const d = Number.isInteger(m.d) && m.d >= 0 && m.d < 8 ? m.d : null; player.cmd = { angle: d === null ? null : d * Math.PI / 4, move: d !== null, fire: m.f === true }; } break;
+      case 'input': if (room.phase === 'battle') { const d = Number.isInteger(m.d) && m.d >= 0 && m.d < 8 ? m.d : null; player.cmd = { angle: d === null ? null : d * Math.PI / 4, move: d !== null, fire: m.f === true }; if (Number.isInteger(m.s) && m.s > player.seq) { player.seq = m.s; player.applied = 0; } } break;
       case 'item': if (room.phase === 'battle') player.useItem = true; break;
     }
   });
@@ -174,7 +178,7 @@ function join(ws, m) {
   const cid = nextCid++;
   // Names end up in other players' pages, so only letters, digits and a few separators survive.
   const name = String(m.name ?? '').replace(/[^\p{L}\p{N}_\- ]/gu, '').trim().slice(0, 10) || `玩家${cid}`;
-  const player = { ws, cid, name, ready: false, pilotId: null, cmd: { angle: null, move: false, fire: false }, useItem: false };
+  const player = { ws, cid, name, ready: false, pilotId: null, cmd: { angle: null, move: false, fire: false }, useItem: false, seq: 0, applied: 0 };
   room.players.push(player);
   room.settings = cleanSettings(room.settings);
   console.log(`[room] ${name} 加入（${room.players.length} 人）`);
