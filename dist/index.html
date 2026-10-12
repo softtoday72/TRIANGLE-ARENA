@@ -1,0 +1,189 @@
+<!doctype html>
+<html lang="zh-Hant">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#050608">
+  <title>三角形競技場亂鬥</title>
+  <meta name="description" content="黑底幾何風格、最多八台機體的鍵盤亂鬥遊戲。">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Cpath d='M32 8 56 54H8Z' fill='%2341e7e1'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <main class="shell">
+    <header class="brandbar">
+      <div class="brand-mark" aria-hidden="true"><span></span></div>
+      <div>
+        <p class="eyebrow">TRIANGLE ARENA // 1992</p>
+        <h1>三角形競技場亂鬥</h1>
+      </div>
+      <div class="status-chip"><i></i> SYSTEM READY</div>
+    </header>
+
+    <section id="setupScreen" class="screen panel active" aria-labelledby="setupTitle">
+      <div class="screen-head">
+        <div>
+          <p class="kicker">NEW CIRCUIT</p>
+          <h2 id="setupTitle">建立一輪對戰</h2>
+        </div>
+        <p class="lede">一次設定，接著讓火力、走位與獎金替你說話。</p>
+      </div>
+      <div class="setup-grid">
+        <label class="control-card">
+          <span>AI 數量 <b id="aiValue">5</b></span>
+          <input id="aiCount" type="range" min="1" max="7" value="5">
+          <small>總計 <strong id="totalValue">6</strong> 台機體</small>
+        </label>
+        <fieldset class="control-card">
+          <legend>對戰形式</legend>
+          <div class="segmented">
+            <label><input type="radio" name="mode" value="ffa" checked><span>個人混戰</span></label>
+            <label><input type="radio" name="mode" value="team"><span>團隊戰</span></label>
+          </div>
+          <select id="teamCount" disabled aria-label="隊伍數量">
+            <option value="2">2 隊</option>
+            <option value="4">4 隊</option>
+          </select>
+        </fieldset>
+        <fieldset class="control-card">
+          <legend>血量模式</legend>
+          <div class="segmented">
+            <label><input type="radio" name="health" value="3" checked><span>3 格耐久</span></label>
+            <label><input type="radio" name="health" value="1"><span>1 擊決勝</span></label>
+          </div>
+          <small>會影響大力彈供應與道具價值</small>
+        </fieldset>
+        <fieldset class="control-card">
+          <legend>場數</legend>
+          <div class="round-picks">
+            <label><input type="radio" name="rounds" value="3"><span>3</span></label>
+            <label><input type="radio" name="rounds" value="5" checked><span>5</span></label>
+            <label><input type="radio" name="rounds" value="10"><span>10</span></label>
+            <label><input type="radio" name="rounds" value="infinite"><span>∞</span></label>
+          </div>
+        </fieldset>
+        <label class="control-card">
+          <span>AI 難度</span>
+          <select id="difficulty">
+            <option value="easy">休閒</option>
+            <option value="normal" selected>標準</option>
+            <option value="hard">老手</option>
+          </select>
+          <small>調整反應時間與瞄準誤差</small>
+        </label>
+        <div class="control-card keymap">
+          <span>控制方式</span>
+          <div><kbd>↑↓←→</kbd> 移動／轉向</div>
+          <div><kbd>SPACE</kbd> 射擊　<kbd>Z</kbd> 道具　<kbd>ESC</kbd> 暫停</div>
+        </div>
+      </div>
+      <div id="onlineCard" class="control-card online-card" hidden>
+        <span>多人連線 <b id="onlineStatus"></b></span>
+        <div id="onlineJoin" class="online-row">
+          <input id="playerName" type="text" maxlength="10" placeholder="你的名字" aria-label="玩家名稱" autocomplete="off">
+          <button id="joinRoom" class="ghost-btn" type="button">加入連線房間</button>
+        </div>
+        <div id="onlineRoom" hidden>
+          <ul id="playerList" class="player-list"></ul>
+          <div class="section-label"><span>LINK</span> 邀請網址</div>
+          <div id="inviteList" class="invite-list"></div>
+          <div class="online-row"><small id="onlineHint"></small><button id="leaveRoom" class="ghost-btn" type="button">離開房間</button></div>
+        </div>
+        <small id="onlineNote" aria-live="polite"></small>
+      </div>
+      <button id="createRun" class="primary-btn">進入第一場 <span>→</span></button>
+    </section>
+
+    <section id="shopScreen" class="screen panel" aria-labelledby="shopTitle">
+      <div class="screen-head compact">
+        <div>
+          <p class="kicker" id="shopRoundLabel">ROUND 01 / 05</p>
+          <h2 id="shopTitle">戰前補給</h2>
+        </div>
+        <div class="wallet"><small>可用資金</small><strong>$<span id="shopMoney">0</span></strong></div>
+      </div>
+      <div class="loadout-strip">
+        <div><small>目前武器</small><b id="heldWeapon">基礎單發</b></div>
+        <div><small>目前道具</small><b id="heldItem">—</b></div>
+        <div><small>本輪戰績</small><b id="recordText">0 勝 · 0 擊殺</b></div>
+      </div>
+      <div class="shop-columns">
+        <div>
+          <div class="section-label"><span>01</span> 武器庫</div>
+          <div id="weaponShop" class="shop-list"></div>
+        </div>
+        <div>
+          <div class="section-label"><span>02</span> 戰術道具</div>
+          <div id="itemShop" class="shop-list"></div>
+          <aside class="intel-box">
+            <b>戰場情報</b>
+            <p id="battleIntel">個人混戰 · 6 台機體 · 3 格耐久</p>
+            <small>裝備存活即可帶入下一場；死亡會失去所有購買品。</small>
+          </aside>
+        </div>
+      </div>
+      <button id="startRound" class="primary-btn">部署並開戰 <span>→</span></button>
+    </section>
+
+    <section id="gameScreen" class="screen game-screen" aria-label="競技場">
+      <div class="game-topbar">
+        <div><span id="hudRound">ROUND 01</span><b id="hudAlive">6 ALIVE</b></div>
+        <div class="timer" id="hudTimer">01:30</div>
+        <div class="hud-money">$<span id="hudMoney">0</span></div>
+      </div>
+      <div class="canvas-wrap">
+        <canvas id="arena" width="1200" height="800" tabindex="0" aria-label="遊戲競技場"></canvas>
+        <div id="countdown" class="countdown" aria-live="polite"></div>
+        <div class="scanline" aria-hidden="true"></div>
+      </div>
+      <div class="game-bottombar">
+        <div class="hud-block"><small>耐久</small><div id="hudHealth" class="health-pips"></div></div>
+        <div class="hud-block"><small>武器</small><b id="hudWeapon">基礎單發</b></div>
+        <div class="hud-block"><small>道具</small><b id="hudItem">—</b></div>
+        <div class="hud-keys"><kbd>SPACE</kbd> FIRE　<kbd>Z</kbd> ITEM　<kbd>ESC</kbd> PAUSE</div>
+      </div>
+    </section>
+
+    <section id="resultScreen" class="screen panel" aria-labelledby="resultTitle">
+      <div class="screen-head compact">
+        <div><p class="kicker">ROUND COMPLETE</p><h2 id="resultTitle">場次結算</h2></div>
+        <div id="winnerBadge" class="winner-badge">勝者 PLAYER</div>
+      </div>
+      <div id="payoutSummary" class="payout-summary"></div>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>排名</th><th>機體</th><th>擊殺</th><th>存活</th><th>擊殺獎金</th><th>存活獎金</th><th>勝負</th><th>合計</th></tr></thead>
+          <tbody id="scoreBody"></tbody>
+        </table>
+      </div>
+      <button id="continueRun" class="primary-btn">前往下一場 <span>→</span></button>
+    </section>
+
+    <section id="finalScreen" class="screen panel final-panel" aria-labelledby="finalTitle">
+      <p class="kicker">CIRCUIT COMPLETE</p>
+      <h2 id="finalTitle">本輪完成</h2>
+      <div id="finalStats" class="final-stats"></div>
+      <button id="newRun" class="primary-btn">建立新一輪 <span>↻</span></button>
+    </section>
+  </main>
+
+  <div id="pauseModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="pauseTitle">
+    <div class="modal-card">
+      <p class="kicker" id="pauseKicker">SYSTEM PAUSED</p><h2 id="pauseTitle">暫停</h2>
+      <button id="resumeGame" class="primary-btn">繼續戰鬥</button>
+      <button id="endGame" class="ghost-btn danger">結束本輪</button>
+    </div>
+  </div>
+  <div id="confirmModal" class="modal" role="dialog" aria-modal="true" aria-labelledby="confirmTitle">
+    <div class="modal-card">
+      <p class="kicker">CONFIRM RESET</p><h2 id="confirmTitle">確定結束本輪？</h2>
+      <p id="confirmText">目前資金、裝備與戰績都會清空。</p>
+      <div class="modal-actions"><button id="cancelEnd" class="ghost-btn">取消</button><button id="confirmEnd" class="primary-btn danger-fill">確定結束</button></div>
+    </div>
+  </div>
+
+  <script src="config.js"></script>
+  <script src="game-core.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>

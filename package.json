@@ -1,0 +1,12 @@
+{
+  "name": "triangle-arena",
+  "version": "0.1.0",
+  "private": true,
+  "description": "三角形競技場亂鬥：瀏覽器遊戲與連線伺服器",
+  "scripts": {
+    "start": "node server/server.js"
+  },
+  "dependencies": {
+    "ws": "^8.22.0"
+  }
+}

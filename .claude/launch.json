@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "tank",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": ["serve", "dist", "-l", "5173"],
+      "port": 5173
+    },
+    {
+      "name": "tank-server",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["server/server.js"],
+      "port": 3000
+    }
+  ]
+}
