@@ -57,7 +57,7 @@ function cleanSettings(s) {
 function publicRun() {
   const run = room.run; if (!run) return null;
   return { round: run.round, maxRounds: run.infinite ? null : run.maxRounds, infinite: run.infinite, settings: run.settings,
-    pilots: run.pilots.map(p => ({ id: p.id, name: p.name, human: p.human, team: p.team, money: p.money, weapon: p.weapon, item: p.item, itemCharges: p.itemCharges, wins: p.wins, totalKills: p.totalKills })) };
+    pilots: run.pilots.map(p => ({ id: p.id, name: p.name, human: p.human, team: p.team, money: p.money, weapon: p.weapon, weaponLevel: p.weaponLevel, item: p.item, itemCharges: p.itemCharges, wins: p.wins, totalKills: p.totalKills })) };
 }
 
 function broadcastRoom() {
@@ -115,15 +115,16 @@ function tick() {
 function sendSnapshots() {
   const b = room.battle;
   const base = { t: 's', n: room.tick, tl: r1(b.timeLeft), cd: r1(b.countdown), st: b.started, en: b.ended, bo: [...b.bountyIds], ev: room.events,
-    b: b.bullets.map(x => [r1(x.x), r1(x.y), r1(x.vx), r1(x.vy), WEAPON_KEYS.indexOf(x.type)]),
-    l: b.lasers.map(l => [r1(l.x), r1(l.y), l.angle, l.active ? 1 : 0]) };
+    // Bullet: x, y, vx, vy, weapon index, radius, wall bounces so far, flags (1 = explodes, 2 = wraps round the edges).
+    b: b.bullets.map(x => [r1(x.x), r1(x.y), r1(x.vx), r1(x.vy), WEAPON_KEYS.indexOf(x.type), x.r, x.bounced, (x.blast ? 1 : 0) | (x.wrap ? 2 : 0)]),
+    l: b.lasers.map(l => [r1(l.x), r1(l.y), l.angle, l.active ? 1 : 0, l.w]) };
   for (const p of room.players) {
     const me = room.run.pilots[p.pilotId];
     send(p.ws, { ...base,
-      me: [me.money, me.weapon, me.item, me.itemCharges],
+      me: [me.money, me.weapon, me.item, me.itemCharges, me.weaponLevel],
       // Newest input received from this player, and how many ticks it has been simulated for.
       k: [p.seq, p.applied],
-      c: b.crafts.map(c => !c.alive ? { al: 0 } : c.cloak > 0 && c.pilot.team !== me.team ? { al: 1, ck: 1, hid: 1 } : { al: 1, x: r1(c.x), y: r1(c.y), vx: r1(c.vx), vy: r1(c.vy), a: c.angle, hp: c.hp, sh: c.shield, ck: c.cloak > 0 ? 1 : 0 }),
+      c: b.crafts.map(c => !c.alive ? { al: 0 } : c.cloak > 0 && c.pilot.team !== me.team ? { al: 1, ck: 1, hid: 1 } : { al: 1, x: r1(c.x), y: r1(c.y), vx: r1(c.vx), vy: r1(c.vy), a: c.angle, hp: c.hp, sh: c.shield, ck: c.cloak > 0 ? 1 : 0, kn: c.knockT > 0 ? 1 : 0 }),
       m: b.mines.filter(m => m.team === me.team).map(m => [r1(m.x), r1(m.y)]) });
   }
   room.events = [];

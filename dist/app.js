@@ -9,10 +9,13 @@
   const esc=s=>String(s).replace(/[&<>"']/g,c=>`&#${c.charCodeAt(0)};`);
   const colors=['#41e7e1','#ff5165','#c8ff4b','#ff9d42','#a98bff','#66a7ff','#ff6fd1','#f0e86b'];
   const teamPalettes=[['#41e7e1','#7ff7f0','#24aaa7','#bafffb'],['#ff5165','#ff8795','#c62f43','#ffbbc3'],['#c8ff4b','#dcff8a','#8fc51f','#efffc7'],['#a98bff','#c5afff','#7754d6','#e2d7ff']];
-  const SPARKS={shield:8,hit:10,kill:28},WEAPON_KEYS=Object.keys(W);
+  const SPARKS={shield:8,hit:10,kill:28},WEAPON_KEYS=Object.keys(W),LEVEL_MARK=['','Ⅱ','Ⅲ'];
+  // Bounce bullets change colour on every wall hit so a hard-to-predict path is still easy to follow.
+  const BOUNCE_COLORS=['#e9f0f2','#ffd34d','#ff9d42','#ff6fd1','#a98bff','#66a7ff'];
+  const weaponLabel=p=>`${W[p.weapon].name}${p.weaponLevel>1?' Lv'+p.weaponLevel:''}`;
 
   // localId is the pilot this browser controls; everything "mine" on screen is looked up through it.
-  const state={screen:'setup',run:null,battle:null,localId:0,particles:[],raf:0,last:0,resultTimer:0,paused:false,useItemQueued:false,keys:new Set()};
+  const state={screen:'setup',run:null,battle:null,localId:0,particles:[],rings:[],pendingSwitch:null,raf:0,last:0,resultTimer:0,paused:false,useItemQueued:false,keys:new Set()};
   // While net.room is set the server owns the run and the battle; this client only sends intent and draws what it is told.
   const net={ws:null,room:null,phase:null,error:null,invite:[],sentInput:'',snapAt:0,tick:1/60,seq:0,inputs:[],base:null,ex:0,ey:0,angle:null};
   const online=()=>!!net.room,isHost=()=>online()&&net.room.hostId===net.room.you;
@@ -30,6 +33,8 @@
     $('#continueRun').addEventListener('click',()=>online()?netSend({t:'ready'}):nextRound());$('#newRun').addEventListener('click',resetToSetup);
     $('#resumeGame').addEventListener('click',resume);$('#endGame').addEventListener('click',()=>{$('#confirmModal').classList.add('active');});
     $('#cancelEnd').addEventListener('click',()=>$('#confirmModal').classList.remove('active'));$('#confirmEnd').addEventListener('click',()=>online()?leaveRoom():resetToSetup());
+    $('#cancelSwitch').addEventListener('click',()=>{state.pendingSwitch=null;$('#switchModal').classList.remove('active');});
+    $('#confirmSwitch').addEventListener('click',()=>{const k=state.pendingSwitch;state.pendingSwitch=null;$('#switchModal').classList.remove('active');if(k)sendBuy('weapon',k);});
     $('#joinRoom').addEventListener('click',joinRoom);$('#leaveRoom').addEventListener('click',leaveRoom);$('#playerName').addEventListener('keydown',e=>{if(e.key==='Enter')joinRoom();});
     window.addEventListener('keydown',e=>{if(e.target?.id==='playerName')return;if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code))e.preventDefault();state.keys.add(e.code);if(e.code==='Escape'&&state.screen==='gameScreen')togglePause();if(e.code==='KeyZ'){if(online()){if(net.phase==='battle')netSend({t:'item'});}else if(state.battle&&!state.paused)state.useItemQueued=true;}});
     window.addEventListener('keyup',e=>state.keys.delete(e.code));
@@ -62,19 +67,27 @@
   function iAmReady(){return !!net.room.players.find(p=>p.cid===net.room.you)?.ready;}
   function renderShop(){
     const run=state.run,p=localPilot(),total=run.infinite?'∞':String(run.maxRounds).padStart(2,'0');
-    $('#shopRoundLabel').textContent=`ROUND ${String(run.round).padStart(2,'0')} / ${total}`;$('#shopMoney').textContent=p.money;$('#heldWeapon').textContent=W[p.weapon].name;$('#heldItem').textContent=p.item?`${ITEMS[p.item].name} × ${p.itemCharges}`:'—';$('#recordText').textContent=`${p.wins} 勝 · ${p.totalKills} 擊殺`;
+    $('#shopRoundLabel').textContent=`ROUND ${String(run.round).padStart(2,'0')} / ${total}`;$('#shopMoney').textContent=p.money;$('#heldWeapon').textContent=weaponLabel(p);$('#heldItem').textContent=p.item?`${ITEMS[p.item].name} × ${p.itemCharges}`:'—';$('#recordText').textContent=`${p.wins} 勝 · ${p.totalKills} 擊殺`;
     $('#battleIntel').textContent=`${run.settings.mode==='ffa'?'個人混戰':run.settings.teams+' 隊團戰'} · ${run.settings.count} 台機體 · ${run.settings.maxHp} 格耐久`;
-    $('#weaponShop').innerHTML=Object.entries(W).filter(([k,v])=>k!=='basic'&&(!v.threeHpOnly||run.settings.maxHp===3)).map(([k,v])=>shopCard(k,v,'weapon',p.weapon===k,p.money)).join('');
-    $('#itemShop').innerHTML=Object.entries(ITEMS).map(([k,v])=>shopCard(k,v,'item',p.item===k,p.money)).join('');
+    // The held weapon is listed first; that is also the only way the basic weapon appears, as an upgrade.
+    const weapons=Object.keys(W).map(k=>[k,core.weaponOffer(run,p,k)]).filter(([,o])=>o).sort((a,z)=>(z[0]===p.weapon)-(a[0]===p.weapon));
+    $('#weaponShop').innerHTML=weapons.map(([k,o])=>weaponCard(k,o,p)).join('');
+    $('#itemShop').innerHTML=Object.keys(ITEMS).map(k=>itemCard(k,core.itemOffer(p,k),p)).join('');
     $$('.shop-card button').forEach(b=>b.addEventListener('click',()=>buy(b.dataset.type,b.dataset.key)));
     const waiting=online()&&iAmReady();$('#startRound').disabled=waiting;
     $('#startRound').innerHTML=!online()?'部署並開戰 <span>→</span>':waiting?`等待其他玩家 ${readyCount()}`:`準備完成 ${readyCount()} <span>→</span>`;
   }
-  function shopCard(k,v,type,owned,money){const disabled=v.price>money||(type==='weapon'&&owned);return `<article class="shop-card ${owned?'owned':''}"><div><h3>${v.name}${owned?' · 已裝備':''}</h3><p>${v.desc}</p></div><button data-type="${type}" data-key="${k}" ${disabled?'disabled':''}>${owned&&type==='weapon'?'裝備中':'$'+v.price}</button></article>`;}
-  function buy(type,key){if(online())netSend({t:'buy',kind:type,key});else if(core.buy(state.run,state.localId,type,key))renderShop();}
+  function weaponCard(k,o,p){const v=W[k],held=o.kind!=='buy',next=o.kind==='upgrade'?`升級 Lv${o.level}：${v.levelDesc[o.level-2]}`:o.kind==='max'?'已達最高等級':v.desc;
+    const label=o.kind==='max'?'已滿級':o.kind==='upgrade'?`升級 $${o.price}`:'$'+o.price;
+    return `<article class="shop-card ${held?'owned':''}"><div><h3>${v.name}${held?` Lv${p.weaponLevel} · 已裝備`:''}</h3><p>${held&&o.kind!=='max'?`目前：${p.weaponLevel>1?v.levelDesc[p.weaponLevel-2]:v.desc}<br>`:''}${next}</p></div><button data-type="weapon" data-key="${k}" ${o.kind==='max'||o.price>p.money?'disabled':''}>${label}</button></article>`;}
+  function itemCard(k,o,p){const v=ITEMS[k],held=o.kind!=='buy',label=o.kind==='full'?'已滿':o.kind==='refill'?`補充 $${o.price}`:'$'+o.price;
+    return `<article class="shop-card ${held?'owned':''}"><div><h3>${v.name}${held?` × ${p.itemCharges} · 已持有`:''}</h3><p>${v.desc}</p></div><button data-type="item" data-key="${k}" ${o.kind==='full'||o.price>p.money?'disabled':''}>${label}</button></article>`;}
+  // Switching away from an upgraded weapon throws its levels away, so ask first.
+  function buy(type,key){const p=localPilot();if(type==='weapon'&&key!==p.weapon&&p.weaponLevel>1){state.pendingSwitch=key;$('#switchText').textContent=`目前的 ${weaponLabel(p)} 會消失，${W[key].name} 從 Lv1 重新開始。`;$('#switchModal').classList.add('active');return;}sendBuy(type,key);}
+  function sendBuy(type,key){if(online())netSend({t:'buy',kind:type,key});else if(core.buy(state.run,state.localId,type,key))renderShop();}
 
   function beginBattle(){
-    state.battle=core.startBattle(state.run);state.particles=[];state.useItemQueued=false;
+    state.battle=core.startBattle(state.run);state.particles=[];state.rings=[];state.useItemQueued=false;
     state.paused=false;updateHUD();show('gameScreen');canvas.focus();state.last=performance.now();cancelAnimationFrame(state.raf);state.raf=requestAnimationFrame(loop);
   }
   function loop(now){const dt=Math.min(.033,(now-state.last)/1000||0);state.last=now;if(state.screen!=='gameScreen')return;if(!state.paused){if(online())updateOnline(dt);else update(dt);if(state.battle)draw();}state.raf=requestAnimationFrame(loop);}
@@ -86,9 +99,9 @@
     if(b.ended)state.resultTimer=setTimeout(()=>{renderResults();show('resultScreen');},850);
   }
   function playerCommand(){let x=0,y=0;if(state.keys.has('ArrowLeft'))x--;if(state.keys.has('ArrowRight'))x++;if(state.keys.has('ArrowUp'))y--;if(state.keys.has('ArrowDown'))y++;return{move:!!(x||y),angle:x||y?Math.atan2(y,x):null,fire:state.keys.has('Space')};}
-  function sparkEvent(e){spark(e.x,e.y,e.type==='shield'?'#66a7ff':state.run.pilots[e.pilotId].color,SPARKS[e.type]);}
+  function sparkEvent(e){if(e.type==='blast'){state.rings.push({x:e.x,y:e.y,r:e.r,t:.35});spark(e.x,e.y,'#c8ff4b',12);return;}spark(e.x,e.y,e.type==='shield'?'#66a7ff':state.run.pilots[e.pilotId].color,SPARKS[e.type]);}
   function spark(x,y,color,n){for(let i=0;i<n;i++){const a=Math.random()*TAU,s=40+Math.random()*180;state.particles.push({x,y,vx:Math.cos(a)*s,vy:Math.sin(a)*s,t:.35+Math.random()*.5,color});}}
-  function updateParticles(dt){for(const p of state.particles){p.t-=dt;p.x+=p.vx*dt;p.y+=p.vy*dt;p.vx*=.97;p.vy*=.97;}state.particles=state.particles.filter(p=>p.t>0);}
+  function updateParticles(dt){for(const p of state.particles){p.t-=dt;p.x+=p.vx*dt;p.y+=p.vy*dt;p.vx*=.97;p.vy*=.97;}state.particles=state.particles.filter(p=>p.t>0);for(const r of state.rings)r.t-=dt;state.rings=state.rings.filter(r=>r.t>0);}
   function renderResults(){const b=state.battle,p=localPilot(),winners=b.winnerIds.map(id=>state.run.pilots[id].name);$('#winnerBadge').textContent=`勝者 ${winners.join(' / ')}`;const pr=b.resultRows.find(r=>r.c.pilot.id===state.localId);$('#payoutSummary').innerHTML=`<div><small>擊殺獎金</small><b>+$${pr.killPay}</b></div><div><small>存活獎金</small><b>+$${pr.survivePay}</b></div><div><small>${pr.win?'勝方獎勵':'輸方補償'}</small><b>+$${pr.outcome}</b></div><div><small>目前資金</small><b>$${p.money}</b></div>`;
     const rows=[...b.resultRows].sort((a,z)=>(+z.win-+a.win)||(z.c.kills-a.c.kills)||(z.c.survival-a.c.survival));$('#scoreBody').innerHTML=rows.map((r,i)=>`<tr class="${r.c.pilot.id===state.localId?'player-row':''}"><td>${String(i+1).padStart(2,'0')}</td><td><span class="pilot-cell"><i class="color-dot" style="background:${r.c.pilot.color}"></i>${esc(r.c.pilot.name)}</span></td><td>${r.c.kills}</td><td>${r.c.survival.toFixed(1)}s</td><td>$${r.killPay}</td><td>$${r.survivePay}</td><td>${r.win?'勝利':'補償'} +$${r.outcome}</td><td class="money-cell">+$${r.total}</td></tr>`).join('');
     const done=!state.run.infinite&&state.run.round>=state.run.maxRounds,waiting=online()&&iAmReady();$('#continueRun').disabled=waiting;
@@ -96,7 +109,7 @@
   }
   function nextRound(){if(!core.advanceRound(state.run)){showFinal();return;}openShop();}
   function showFinal(){const p=localPilot(),rank=[...state.run.pilots].sort((a,b)=>b.wins-a.wins||b.totalKills-a.totalKills).findIndex(x=>x.id===state.localId)+1;$('#finalStats').innerHTML=`<div><small>最終排名</small><b>#${rank}</b></div><div><small>勝場</small><b>${p.wins}</b></div><div><small>總擊殺</small><b>${p.totalKills}</b></div><div><small>剩餘資金</small><b>$${p.money}</b></div>`;show('finalScreen');}
-  function updateHUD(){const b=state.battle;if(!b)return;const p=localCraft();$('#hudRound').textContent=`ROUND ${String(state.run.round).padStart(2,'0')}`;$('#hudAlive').textContent=`${b.crafts.filter(c=>c.alive).length} ALIVE`;$('#hudTimer').textContent=fmtTime(b.timeLeft);$('#hudMoney').textContent=p.pilot.money;$('#hudWeapon').textContent=W[p.pilot.weapon].name;$('#hudItem').textContent=p.pilot.item?`${ITEMS[p.pilot.item].name} × ${p.pilot.itemCharges}`:'—';$('#hudHealth').innerHTML=Array.from({length:p.maxHp},(_,i)=>`<i class="${i<p.hp?'':'empty'}"></i>`).join('');}
+  function updateHUD(){const b=state.battle;if(!b)return;const p=localCraft();$('#hudRound').textContent=`ROUND ${String(state.run.round).padStart(2,'0')}`;$('#hudAlive').textContent=`${b.crafts.filter(c=>c.alive).length} ALIVE`;$('#hudTimer').textContent=fmtTime(b.timeLeft);$('#hudMoney').textContent=p.pilot.money;$('#hudWeapon').textContent=weaponLabel(p.pilot);$('#hudItem').textContent=p.pilot.item?`${ITEMS[p.pilot.item].name} × ${p.pilot.itemCharges}`:'—';$('#hudHealth').innerHTML=Array.from({length:p.maxHp},(_,i)=>`<i class="${i<p.hp?'':'empty'}"></i>`).join('');}
   function pause(){const on=online();if(!on)state.paused=true;$('#pauseKicker').textContent=on?'MATCH STILL RUNNING':'SYSTEM PAUSED';$('#pauseTitle').textContent=on?'選單':'暫停';$('#endGame').textContent=on?'離開房間':'結束本輪';$('#confirmTitle').textContent=on?'確定離開房間？':'確定結束本輪？';$('#confirmText').textContent=on?'你的機體會交給 AI 接手，這一輪無法再加入。':'目前資金、裝備與戰績都會清空。';$('#confirmEnd').textContent=on?'確定離開':'確定結束';$('#pauseModal').classList.add('active');}
   function resume(){state.paused=false;$('#pauseModal').classList.remove('active');state.last=performance.now();canvas.focus();}
   function togglePause(){$('#pauseModal').classList.contains('active')?resume():pause();}
@@ -138,16 +151,16 @@
       if(prev!=='result')state.resultTimer=setTimeout(()=>{renderResults();show('resultScreen');},850);else if(state.screen==='resultScreen')renderResults();
     }else if(m.phase==='final')showFinal();
   }
-  function beginOnlineBattle(){state.battle=null;state.particles=[];net.sentInput='';net.seq=0;net.inputs=[{s:0,vx:0,vy:0,t:performance.now()}];net.base=null;net.ex=net.ey=0;net.angle=null;state.paused=false;$('#pauseModal').classList.remove('active');$('#countdown').textContent='';show('gameScreen');canvas.focus();state.last=performance.now();cancelAnimationFrame(state.raf);state.raf=requestAnimationFrame(loop);}
+  function beginOnlineBattle(){state.battle=null;state.particles=[];state.rings=[];net.sentInput='';net.seq=0;net.inputs=[{s:0,vx:0,vy:0,t:performance.now()}];net.base=null;net.ex=net.ey=0;net.angle=null;state.paused=false;$('#pauseModal').classList.remove('active');$('#countdown').textContent='';show('gameScreen');canvas.focus();state.last=performance.now();cancelAnimationFrame(state.raf);state.raf=requestAnimationFrame(loop);}
   // Rebuilds a battle object shaped like the core's, so drawing and the HUD work the same in both modes.
   function onSnapshot(m){
     if(net.phase!=='battle'||!state.run)return;const run=state.run,me=localPilot(),now=performance.now();
     const before=net.base?predictSelf(now):null;
-    [me.money,me.weapon,me.item,me.itemCharges]=m.me;
+    [me.money,me.weapon,me.item,me.itemCharges,me.weaponLevel]=m.me;
     state.battle={started:m.st,ended:m.en,timeLeft:m.tl,countdown:m.cd,bountyIds:new Set(m.bo),winnerIds:[],resultRows:[],
-      crafts:m.c.map((c,i)=>({pilot:run.pilots[i],alive:!!c.al,hidden:!!c.hid,sx:c.x,sy:c.y,x:c.x,y:c.y,vx:c.vx||0,vy:c.vy||0,angle:c.a||0,r:CFG.craft.radius,hp:c.hp||0,maxHp:run.settings.maxHp,shield:c.sh||0,cloak:c.ck?1:0})),
-      bullets:m.b.map(([x,y,vx,vy,k])=>{const type=WEAPON_KEYS[k];return{sx:x,sy:y,x,y,vx,vy,type,r:type==='heavy'?7:type==='homing'?5:4};}),
-      lasers:m.l.map(([x,y,angle,active])=>({x,y,angle,active:!!active})),
+      crafts:m.c.map((c,i)=>({pilot:run.pilots[i],alive:!!c.al,hidden:!!c.hid,sx:c.x,sy:c.y,x:c.x,y:c.y,vx:c.vx||0,vy:c.vy||0,angle:c.a||0,r:CFG.craft.radius,hp:c.hp||0,maxHp:run.settings.maxHp,shield:c.sh||0,cloak:c.ck?1:0,knocked:!!c.kn})),
+      bullets:m.b.map(([x,y,vx,vy,k,r,bounced,flags])=>({sx:x,sy:y,x,y,vx,vy,type:WEAPON_KEYS[k],r,bounced,blast:flags&1,wrap:!!(flags&2)})),
+      lasers:m.l.map(([x,y,angle,active,w])=>({x,y,angle,active:!!active,w})),
       mines:m.m.map(([x,y])=>({x,y,team:me.team}))};
     net.snapAt=now;m.ev.forEach(sparkEvent);rebasePrediction(m,now,before);
   }
@@ -168,7 +181,8 @@
     while(log.length>1&&log[0].s<ack)log.shift();
     // An input held while the server was not simulating this craft (countdown) has not really been running that long.
     if(now-log[0].t-applied*net.tick*1000>400)log[0].t=now-applied*net.tick*1000;
-    if(!me.alive||!b.started||b.ended){net.base=null;net.ex=net.ey=0;return;}
+    // While knocked back the server moves this craft regardless of input, so there is nothing to predict.
+    if(!me.alive||!b.started||b.ended||me.knocked){net.base=null;net.ex=net.ey=0;return;}
     net.base={x:me.sx,y:me.sy,n:applied};
     // Whatever the new snapshot disagrees with is kept as an offset and faded out, so corrections never show as a jump.
     if(before){const after=predictSelf(now);net.ex+=before.x-after.x;net.ey+=before.y-after.y;if(Math.hypot(net.ex,net.ey)>80)net.ex=net.ey=0;}
@@ -193,16 +207,22 @@
   }
 
   function draw(){ctx.fillStyle='#020304';ctx.fillRect(0,0,1200,800);drawGrid();const b=state.battle,me=localCraft();
-    if(me?.alive)drawAimAssist(me);for(const m of b.mines)drawMine(m);for(const l of b.lasers)drawLaser(l);for(const bullet of b.bullets)drawBullet(bullet);for(const c of b.crafts)if(c.alive)drawCraft(c);for(const p of state.particles){ctx.globalAlpha=clamp(p.t*2,0,1);ctx.fillStyle=p.color;ctx.fillRect(p.x-2,p.y-2,4,4);}ctx.globalAlpha=1;
+    if(me?.alive)drawAimAssist(me);for(const m of b.mines)drawMine(m);for(const l of b.lasers)drawLaser(l);for(const bullet of b.bullets)drawBullet(bullet);for(const c of b.crafts)if(c.alive)drawCraft(c);for(const r of state.rings){ctx.globalAlpha=clamp(r.t/.35,0,1);ctx.strokeStyle='#c8ff4b';ctx.lineWidth=2;ctx.beginPath();ctx.arc(r.x,r.y,r.r*(1.15-r.t/.35*.3),0,TAU);ctx.stroke();}for(const p of state.particles){ctx.globalAlpha=clamp(p.t*2,0,1);ctx.fillStyle=p.color;ctx.fillRect(p.x-2,p.y-2,4,4);}ctx.globalAlpha=1;
     if(!me.alive){ctx.fillStyle='#0008';ctx.fillRect(0,0,1200,800);ctx.textAlign='center';ctx.fillStyle='#e9f0f2';ctx.font='700 28px Cascadia Mono, monospace';ctx.fillText('觀戰模式',600,380);ctx.fillStyle='#84919b';ctx.font='14px Cascadia Mono, monospace';ctx.fillText('等待本場結束',600,410);}
   }
   function drawGrid(){ctx.strokeStyle='#0d1519';ctx.lineWidth=1;for(let x=40;x<1200;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,800);ctx.stroke();}for(let y=40;y<800;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(1200,y);ctx.stroke();}ctx.strokeStyle='#263039';ctx.lineWidth=3;ctx.strokeRect(2,2,1196,796);}
   function drawAimAssist(c){const lock=core.findAimAssist(state.battle,c),angle=lock?.angle??c.angle,endX=lock?lock.target.x:c.x+Math.cos(angle)*CFG.aimAssist.guideLength,endY=lock?lock.target.y:c.y+Math.sin(angle)*CFG.aimAssist.guideLength;ctx.save();ctx.strokeStyle=c.pilot.color;ctx.lineWidth=1;ctx.globalAlpha=lock?.3:.12;ctx.setLineDash(lock?[5,8]:[3,9]);ctx.beginPath();ctx.moveTo(c.x+Math.cos(angle)*28,c.y+Math.sin(angle)*28);ctx.lineTo(endX,endY);ctx.stroke();if(lock){ctx.globalAlpha=.7;ctx.setLineDash([]);ctx.beginPath();ctx.arc(lock.target.x,lock.target.y,lock.target.r+8,0,TAU);ctx.stroke();}ctx.restore();}
   function drawCraft(c){const isEnemy=c.pilot.team!==localPilot().team;if(c.cloak>0&&isEnemy)return;ctx.save();ctx.translate(c.x,c.y);ctx.rotate(c.angle);ctx.globalAlpha=c.cloak>0?.3:1;ctx.shadowColor=c.pilot.color;ctx.shadowBlur=12;ctx.strokeStyle=c.pilot.color;ctx.fillStyle='#050608';ctx.lineWidth=3;ctx.beginPath();ctx.moveTo(24,0);ctx.lineTo(-16,-15);ctx.lineTo(-10,0);ctx.lineTo(-16,15);ctx.closePath();ctx.fill();ctx.stroke();ctx.shadowBlur=0;if(c.shield>0){ctx.strokeStyle='#66a7ff';ctx.lineWidth=2;ctx.setLineDash([4,5]);ctx.beginPath();ctx.arc(0,0,27,0,TAU);ctx.stroke();ctx.setLineDash([]);}ctx.restore();ctx.globalAlpha=1;
-    ctx.textAlign='center';ctx.font='10px Cascadia Mono, monospace';ctx.fillStyle='#84919b';ctx.fillText(c.pilot.name,c.x,c.y+36);if(state.battle.bountyIds.has(c.pilot.id)){ctx.fillStyle='#ffd34d';ctx.font='17px sans-serif';ctx.fillText('♛',c.x,c.y-27);}for(let i=0;i<c.hp;i++){ctx.fillStyle=c.pilot.color;ctx.fillRect(c.x-(c.maxHp*7)/2+i*7,c.y+24,5,2);}}
-  function drawBullet(b){ctx.save();ctx.fillStyle=b.type==='heavy'?'#ff9d42':b.type==='homing'?'#41e7e1':'#e9f0f2';ctx.shadowColor=ctx.fillStyle;ctx.shadowBlur=b.type==='homing'?16:10;ctx.beginPath();ctx.arc(b.x,b.y,b.r,0,TAU);ctx.fill();ctx.restore();}
+    ctx.textAlign='center';ctx.font='10px Cascadia Mono, monospace';ctx.fillStyle='#84919b';ctx.fillText(c.pilot.name,c.x,c.y+36);if(state.battle.bountyIds.has(c.pilot.id)){ctx.fillStyle='#ffd34d';ctx.font='17px sans-serif';ctx.fillText('♛',c.x,c.y-27);}for(let i=0;i<c.hp;i++){ctx.fillStyle=c.pilot.color;ctx.fillRect(c.x-(c.maxHp*7)/2+i*7,c.y+24,5,2);}
+    // Weapon level next to the health bar, so opponents can tell an upgraded craft from afar.
+    const lv=c.pilot.weaponLevel||1;if(lv>1){ctx.fillStyle='#c8ff4b';ctx.font='700 11px Cascadia Mono, monospace';ctx.textAlign='left';ctx.fillText(LEVEL_MARK[lv-1],c.x+(c.maxHp*7)/2+4,c.y+29);}}
+  function drawBullet(b){const color=b.blast?'#c8ff4b':b.type==='heavy'?'#ff9d42':b.type==='homing'?'#41e7e1':b.type==='bounce'?BOUNCE_COLORS[Math.min(b.bounced||0,BOUNCE_COLORS.length-1)]:'#e9f0f2';
+    // A wrapping bullet near an edge is also drawn where it is about to come back in.
+    const spots=[[b.x,b.y]];if(b.wrap){const gx=b.x<30?1200:b.x>1170?-1200:0,gy=b.y<30?800:b.y>770?-800:0;if(gx)spots.push([b.x+gx,b.y]);if(gy)spots.push([b.x,b.y+gy]);}
+    ctx.save();ctx.fillStyle=color;ctx.shadowColor=color;ctx.shadowBlur=b.type==='homing'||b.blast?16:10;for(const[x,y]of spots){ctx.beginPath();ctx.arc(x,y,b.r,0,TAU);ctx.fill();}ctx.restore();}
   function drawMine(m){const visible=m.team===localPilot().team&&CFG.rules.friendlyMinesVisible;if(!visible)return;ctx.save();ctx.translate(m.x,m.y);ctx.strokeStyle='#ff9d42';ctx.globalAlpha=.65;ctx.setLineDash([3,4]);ctx.beginPath();ctx.arc(0,0,12,0,TAU);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='#ff9d42';ctx.fillRect(-2,-2,4,4);ctx.restore();}
-  function drawLaser(l){ctx.save();ctx.translate(l.x,l.y);ctx.rotate(l.angle);ctx.strokeStyle=l.active?'#fff':'#ff5165';ctx.lineWidth=l.active?5:1;ctx.globalAlpha=l.active?1:.65;ctx.shadowColor='#ff5165';ctx.shadowBlur=l.active?25:8;ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(1500,0);ctx.stroke();ctx.restore();}
+  // The warning shows the beam's real width, so players can see how far they need to move.
+  function drawLaser(l){const w=l.w||3;ctx.save();ctx.translate(l.x,l.y);ctx.rotate(l.angle);if(!l.active&&w>3){ctx.fillStyle='#ff5165';ctx.globalAlpha=.12;ctx.fillRect(0,-w,1500,w*2);}ctx.strokeStyle=l.active?'#fff':'#ff5165';ctx.lineWidth=l.active?Math.max(5,w*2):1;ctx.globalAlpha=l.active?1:.65;ctx.shadowColor='#ff5165';ctx.shadowBlur=l.active?25:8;ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(1500,0);ctx.stroke();ctx.restore();}
 
   setupListeners();refreshSetup();
   // The multiplayer entry only appears when this page was served by the game server.

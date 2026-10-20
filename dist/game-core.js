@@ -11,8 +11,16 @@
   const dist = (a, b) => Math.hypot(a.x - b.x, a.y - b.y);
   const own = (obj, key) => Object.prototype.hasOwnProperty.call(obj, key);
   const IDLE = Object.freeze({ angle: null, move: false, fire: false, useItem: false });
+  const DEG = Math.PI / 180, BARREL_GAP = 13;
 
   function createCore({ config: CFG, weapons: W, items: ITEMS, random = Math.random }) {
+    // A weapon's numbers at a given level: the base entry with every level up to that one applied on top.
+    const statCache = new Map();
+    function weaponStats(type, level = 1) {
+      const key = type + level;
+      if (!statCache.has(key)) statCache.set(key, Object.assign({}, W[type], ...(W[type].levels || []).slice(0, level - 1)));
+      return statCache.get(key);
+    }
 
     // ---- run (state that survives across rounds) ----
 
@@ -24,7 +32,7 @@
         name: i < humans ? (humans === 1 ? 'PLAYER' : `P${i + 1}`) : `CPU-${String(i).padStart(2, '0')}`,
         human: i < humans,
         team: mode === 'ffa' ? i : i % teams,
-        money: 0, weapon: 'basic', item: null, itemCharges: 0,
+        money: 0, weapon: 'basic', weaponLevel: 1, item: null, itemCharges: 0,
         wins: 0, totalKills: 0, lossStreak: 0, aliveLast: true,
         personality: { near: .65 + random() * .55, retaliate: .3 + random() * .7, bounty: .15 + random() * .7, wander: random() * .25 }
       }));
@@ -37,28 +45,51 @@
       return true;
     }
 
-    function autoBuy(run) {
-      run.pilots.filter(p => !p.human).forEach(p => {
-        const heldPrice = W[p.weapon].price;
-        const candidates = Object.entries(W).filter(([, v]) => v.price > heldPrice && v.price <= p.money && (!v.threeHpOnly || run.settings.maxHp === 3)).sort((a, b) => b[1].price - a[1].price);
-        if (candidates[0]) { p.weapon = candidates[0][0]; p.money -= candidates[0][1].price; }
-        const heldItemPrice = p.item && p.itemCharges > 0 ? ITEMS[p.item].price : 0;
-        const its = Object.entries(ITEMS).filter(([, v]) => v.price > heldItemPrice && v.price <= p.money).sort((a, b) => b[1].price - a[1].price);
-        if (its[0]) { p.item = its[0][0]; p.itemCharges = its[0][1].charges; p.money -= its[0][1].price; }
-      });
+    // What buying `key` would mean for this pilot right now, or null when it is not on sale to them.
+    // kind: 'buy' a new weapon (back to Lv1), 'upgrade' the held one, or 'max' when it is already Lv3.
+    function weaponOffer(run, p, key) {
+      if (!own(W, key)) return null;
+      const w = W[key];
+      if (w.threeHpOnly && run.settings.maxHp !== 3) return null;
+      if (key === p.weapon) return p.weaponLevel >= 3 ? { kind: 'max', price: 0, level: 3 } : { kind: 'upgrade', price: w.upgrade[p.weaponLevel - 1], level: p.weaponLevel + 1 };
+      if (key === 'basic') return null; // only dying takes you back to the basic weapon
+      return { kind: 'buy', price: w.price, level: 1 };
+    }
+
+    // kind: 'buy' a different item, 'refill' the held one (paying only for the missing charges), or 'full'.
+    function itemOffer(p, key) {
+      if (!own(ITEMS, key)) return null;
+      const it = ITEMS[key];
+      if (p.item !== key) return { kind: 'buy', price: it.price };
+      const missing = it.charges - p.itemCharges;
+      return missing <= 0 ? { kind: 'full', price: 0 } : { kind: 'refill', price: Math.ceil(it.price * missing / it.charges / 10) * 10 };
     }
 
     function buy(run, pilotId, type, key) {
-      const p = run.pilots[pilotId], table = type === 'weapon' ? W : type === 'item' ? ITEMS : null;
-      if (!p || !table || !own(table, key)) return false;
-      const obj = table[key];
-      if (p.money < obj.price) return false;
-      if (type === 'weapon') {
-        if (key === 'basic' || p.weapon === key || (obj.threeHpOnly && run.settings.maxHp !== 3)) return false;
-        p.weapon = key;
-      } else { p.item = key; p.itemCharges = obj.charges; }
-      p.money -= obj.price;
+      const p = run.pilots[pilotId];
+      const offer = !p ? null : type === 'weapon' ? weaponOffer(run, p, key) : type === 'item' ? itemOffer(p, key) : null;
+      if (!offer || offer.kind === 'max' || offer.kind === 'full' || p.money < offer.price) return false;
+      if (type === 'weapon') { if (offer.kind === 'upgrade') p.weaponLevel++; else { p.weapon = key; p.weaponLevel = 1; } }
+      else { p.item = key; p.itemCharges = ITEMS[key].charges; }
+      p.money -= offer.price;
       return true;
+    }
+
+    function investedIn(p) { const w = W[p.weapon]; let total = w.price; for (let l = 1; l < p.weaponLevel; l++) total += w.upgrade[l - 1]; return total; }
+
+    // AI shopping: switch to a weapon worth more than everything sunk into the current one, otherwise
+    // upgrade what it holds, then refill or replace the item with what is left.
+    function autoBuy(run) {
+      run.pilots.filter(p => !p.human).forEach(p => {
+        const worth = investedIn(p);
+        const better = Object.keys(W).filter(k => { const o = weaponOffer(run, p, k); return o && o.kind === 'buy' && o.price > worth && o.price <= p.money; }).sort((a, b) => W[b].price - W[a].price);
+        if (better[0]) buy(run, p.id, 'weapon', better[0]);
+        else while (buy(run, p.id, 'weapon', p.weapon));
+        if (p.item) buy(run, p.id, 'item', p.item);
+        const heldItemPrice = p.item && p.itemCharges > 0 ? ITEMS[p.item].price : 0;
+        const its = Object.entries(ITEMS).filter(([, v]) => v.price > heldItemPrice && v.price <= p.money).sort((a, b) => b[1].price - a[1].price);
+        if (its[0]) buy(run, p.id, 'item', its[0][0]);
+      });
     }
 
     // ---- battle (state of a single round) ----
@@ -71,7 +102,7 @@
     function startBattle(run) {
       const positions = spawnPositions(run.pilots.length);
       const battle = { settings: run.settings, crafts: [], bullets: [], mines: [], lasers: [], events: [], time: 0, timeLeft: CFG.arena.roundTime, started: false, ended: false, countdown: 3, survivalTick: CFG.rewards.survivalSeconds, bountyIds: new Set(), winnerIds: [], resultRows: [] };
-      battle.crafts = run.pilots.map((p, i) => ({ pilot: p, x: positions[i].x, y: positions[i].y, angle: quantize8(positions[i].a), vx: 0, vy: 0, r: CFG.craft.radius, hp: run.settings.maxHp, maxHp: run.settings.maxHp, alive: true, cooldown: .5 + random() * .5, shield: p.item === 'shield' ? p.itemCharges : 0, cloak: 0, kills: 0, survival: 0, lastAttacker: null, aiThink: 0, aiCommand: null, aiTargetId: null, aiTargetTime: 0, aiFireDelay: 0, aiShotDelay: 0, aiStallTime: 0, aiReposition: 0, orbitSign: random() < .5 ? -1 : 1, placedMines: 0 }));
+      battle.crafts = run.pilots.map((p, i) => ({ pilot: p, x: positions[i].x, y: positions[i].y, angle: quantize8(positions[i].a), vx: 0, vy: 0, r: CFG.craft.radius, hp: run.settings.maxHp, maxHp: run.settings.maxHp, alive: true, cooldown: .5 + random() * .5, shield: p.item === 'shield' ? p.itemCharges : 0, cloak: 0, kills: 0, survival: 0, lastAttacker: null, aiThink: 0, aiCommand: null, aiTargetId: null, aiTargetTime: 0, aiFireDelay: 0, aiShotDelay: 0, aiStallTime: 0, aiReposition: 0, orbitSign: random() < .5 ? -1 : 1, placedMines: 0, knockT: 0, kvx: 0, kvy: 0 }));
       return battle;
     }
 
@@ -99,10 +130,10 @@
     function emit(battle, type, c) { battle.events.push({ type, x: c.x, y: c.y, pilotId: c.pilot.id }); }
 
     function shotLaneHits(c, target, angle, tx = target.x, ty = target.y) {
-      const type = c.pilot.weapon, w = W[type], dx = tx - c.x, dy = ty - c.y, cs = Math.cos(angle), sn = Math.sin(angle);
+      const type = c.pilot.weapon, w = weaponStats(type, c.pilot.weaponLevel), dx = tx - c.x, dy = ty - c.y, cs = Math.cos(angle), sn = Math.sin(angle);
       const along = dx * cs + dy * sn, cross = Math.abs(dx * sn - dy * cs);
       if (type === 'homing') return along > 0 && Math.hypot(dx, dy) <= w.detectRange;
-      const bulletRadius = type === 'heavy' ? 7 : 4, spread = type === 'triple' ? 13 : 0, beam = type === 'laser' ? 3 : bulletRadius;
+      const bulletRadius = w.radius ?? 4, spread = type === 'triple' ? (w.barrels - 1) / 2 * BARREL_GAP : 0, beam = type === 'laser' ? w.halfWidth : bulletRadius;
       return along > 0 && cross <= target.r + beam + spread + CFG.ai.laneMargin;
     }
 
@@ -161,7 +192,9 @@
 
     function applyCommand(battle, c, cmd, dt) {
       if (cmd.angle !== null && cmd.angle !== undefined) c.angle = quantize8(cmd.angle);
-      if (cmd.move) { c.vx = Math.cos(c.angle) * CFG.craft.speed; c.vy = Math.sin(c.angle) * CFG.craft.speed; } else { c.vx = c.vy = 0; }
+      // A craft knocked back by a heavy bullet slides for a moment regardless of its controls.
+      if (c.knockT > 0) { c.knockT -= dt; c.vx = c.kvx; c.vy = c.kvy; }
+      else if (cmd.move) { c.vx = Math.cos(c.angle) * CFG.craft.speed; c.vy = Math.sin(c.angle) * CFG.craft.speed; } else { c.vx = c.vy = 0; }
       c.x += c.vx * dt; c.y += c.vy * dt; wallClamp(c);
       if (cmd.fire) fire(battle, c);
     }
@@ -199,16 +232,27 @@
 
     function fire(battle, c) {
       if (c.cooldown > 0 || !c.alive || (!c.pilot.human && c.aiShotDelay > 0)) return;
-      const type = c.pilot.weapon, w = W[type], assist = findAimAssist(battle, c), shotAngle = assist?.angle ?? c.angle;
+      const type = c.pilot.weapon, w = weaponStats(type, c.pilot.weaponLevel), assist = findAimAssist(battle, c), shotAngle = assist?.angle ?? c.angle;
       c.cooldown = w.cooldown; if (!c.pilot.human) c.aiShotDelay = w.cooldown + CFG.difficulty[battle.settings.difficulty].shotPause; if (c.cloak > 0) c.cloak = 0;
       const salvo = `${c.pilot.id}-${battle.time.toFixed(3)}`;
-      if (type === 'laser') { battle.lasers.push({ owner: c.pilot.id, team: c.pilot.team, x: c.x, y: c.y, angle: shotAngle, t: .5, active: false, salvo }); return; }
-      if (type === 'triple') [-13, 0, 13].forEach(offset => spawnBullet(battle, c, type, salvo, offset, shotAngle)); else spawnBullet(battle, c, type, salvo, 0, shotAngle);
+      if (type === 'laser') { battle.lasers.push({ owner: c.pilot.id, team: c.pilot.team, x: c.x, y: c.y, angle: shotAngle, t: .5, active: false, salvo, w: w.halfWidth }); return; }
+      // Several shots per trigger pull fan out evenly around the aim (or sit side by side for the triple).
+      const fan = (n, step) => Array.from({ length: n }, (_, i) => (i - (n - 1) / 2) * step);
+      if (type === 'triple') fan(w.barrels, BARREL_GAP).forEach(offset => spawnBullet(battle, c, w, type, salvo, offset, shotAngle));
+      else if (type === 'homing') fan(w.missiles, w.spread * DEG).forEach(da => spawnBullet(battle, c, w, type, salvo, 0, shotAngle + da));
+      else if (type === 'bounce') fan(w.shots, w.shots > 1 ? 2 * w.spread * DEG : 0).forEach(da => spawnBullet(battle, c, w, type, salvo, 0, shotAngle + da));
+      else spawnBullet(battle, c, w, type, salvo, 0, shotAngle);
+      if (w.maxLive) {
+        const live = battle.bullets.filter(b => !b.dead && b.owner === c.pilot.id && b.type === type);
+        live.slice(0, Math.max(0, live.length - w.maxLive)).forEach(b => { b.dead = true; });
+      }
     }
 
-    function spawnBullet(battle, c, type, salvo, offset = 0, angle = c.angle, x = null, y = null) {
-      const w = W[type], px = x ?? c.x + Math.cos(angle) * 25 - Math.sin(angle) * offset, py = y ?? c.y + Math.sin(angle) * 25 + Math.cos(angle) * offset;
-      battle.bullets.push({ owner: c.pilot.id, team: c.pilot.team, type, x: px, y: py, px, py, angle, vx: Math.cos(angle) * w.speed, vy: Math.sin(angle) * w.speed, r: type === 'heavy' ? 7 : type === 'homing' ? 5 : 4, damage: w.damage, strength: w.strength, bounces: type === 'bounce' ? 2 : 0, distance: 0, salvo, hit: new Set(), dead: false, life: w.life ?? 5, targetId: null, closestTargetDist: Infinity, homingSpent: false });
+    function spawnBullet(battle, c, w, type, salvo, offset = 0, angle = c.angle, x = null, y = null) {
+      const px = x ?? c.x + Math.cos(angle) * 25 - Math.sin(angle) * offset, py = y ?? c.y + Math.sin(angle) * 25 + Math.cos(angle) * offset;
+      battle.bullets.push({ owner: c.pilot.id, team: c.pilot.team, type, x: px, y: py, px, py, angle, vx: Math.cos(angle) * w.speed, vy: Math.sin(angle) * w.speed, r: w.radius ?? 4, damage: w.damage, strength: w.strength,
+        bounces: type === 'bounce' ? w.bounces : 0, bounced: 0, maxHits: w.maxHits ?? 1, wrap: !!w.wrap, blast: w.blast || 0, knockback: w.knockback || 0, arc: w.arc, fragments: w.fragments, group: w.missiles || 1,
+        distance: 0, salvo, hit: new Set(), dead: false, life: w.life ?? 5, targetId: null, closestTargetDist: Infinity, homingSpent: false });
     }
 
     function updateBullets(battle, dt) {
@@ -218,11 +262,16 @@
         if (b.dead) continue; b.life -= dt; if (b.life <= 0) { b.dead = true; continue; }
         if (b.type === 'homing') homeBullet(battle, b, dt);
         b.px = b.x; b.py = b.y; b.x += b.vx * dt; b.y += b.vy * dt; b.distance += Math.hypot(b.vx, b.vy) * dt;
-        if (b.type === 'split' && b.distance >= 200) { b.dead = true; for (let i = -2; i <= 2; i++) spawnFragment(battle, b, b.angle + i * Math.PI / 12); continue; }
+        if (b.type === 'split' && b.distance >= 200) {
+          b.dead = true; const arc = b.arc * DEG, ring = b.arc >= 360;
+          // A full circle has no end fragments, so its spacing divides by n instead of n - 1.
+          for (let i = 0; i < b.fragments; i++) spawnFragment(battle, b, ring ? b.angle + i * arc / b.fragments : b.angle + (i - (b.fragments - 1) / 2) * arc / (b.fragments - 1));
+          continue;
+        }
         handleWalls(b);
         for (const c of battle.crafts) {
           if (!c.alive || c.pilot.team === b.team || b.hit.has(c.pilot.id)) continue;
-          if (Math.hypot(c.x - b.x, c.y - b.y) < c.r + b.r) { b.hit.add(c.pilot.id); damageCraft(battle, c, b.damage, b.owner, b.salvo); if (b.type !== 'pierce' || b.hit.size >= 2) b.dead = true; break; }
+          if (Math.hypot(c.x - b.x, c.y - b.y) < c.r + b.r) { b.hit.add(c.pilot.id); if (b.knockback) knockBack(c, b); damageCraft(battle, c, b.damage, b.owner, b.salvo); if (b.hit.size >= b.maxHits) b.dead = true; break; }
         }
       }
       for (let i = 0; i < bs.length; i++) for (let j = i + 1; j < bs.length; j++) {
@@ -231,12 +280,30 @@
         if (a.type === 'pierce') { b.dead = true; continue; } if (b.type === 'pierce') { a.dead = true; continue; }
         if (a.strength === b.strength) { a.dead = b.dead = true; } else if (a.strength > b.strength) { a.strength -= b.strength; b.dead = true; } else { b.strength -= a.strength; a.dead = true; }
       }
+      // Basic Lv3 bullets blow up however they went: hit, wall, timeout or shot down.
+      for (const b of bs) if (b.dead && b.blast && !b.noBlast && !b.blasted) explode(battle, b);
       battle.bullets = bs.filter(b => !b.dead);
+    }
+
+    function explode(battle, b) {
+      b.blasted = true;
+      battle.events.push({ type: 'blast', x: b.x, y: b.y, r: b.blast, pilotId: b.owner });
+      for (const c of battle.crafts) if (c.alive && c.pilot.team !== b.team && !b.hit.has(c.pilot.id) && Math.hypot(c.x - b.x, c.y - b.y) < b.blast + c.r) damageCraft(battle, c, 1, b.owner, b.salvo);
+      // Enemy bullets in range are worn down like in a bullet-on-bullet hit; whatever this destroys does not explode in turn.
+      for (const o of battle.bullets) {
+        if (o.dead || o.team === b.team || o.type === 'pierce' || Math.hypot(o.x - b.x, o.y - b.y) >= b.blast + o.r) continue;
+        if (o.strength > 1) o.strength--; else { o.dead = true; o.noBlast = true; }
+      }
+    }
+
+    function knockBack(c, b) {
+      const speed = Math.hypot(b.vx, b.vy) || 1, push = b.knockback / CFG.weaponFx.knockTime;
+      c.knockT = CFG.weaponFx.knockTime; c.kvx = b.vx / speed * push; c.kvy = b.vy / speed * push;
     }
 
     function spawnFragment(battle, parent, angle) {
       const fake = { pilot: { id: parent.owner, team: parent.team }, x: parent.x - Math.cos(angle) * 25, y: parent.y - Math.sin(angle) * 25, angle };
-      spawnBullet(battle, fake, 'basic', parent.salvo, 0, angle, parent.x, parent.y);
+      spawnBullet(battle, fake, weaponStats('basic'), 'basic', parent.salvo, 0, angle, parent.x, parent.y);
     }
 
     function interceptAngle(b, target, speed, maxLead) {
@@ -253,9 +320,18 @@
       const w = W.homing; if (b.homingSpent) return;
       let target = battle.crafts.find(c => c.alive && c.pilot.id === b.targetId && c.pilot.team !== b.team);
       if (!target) {
-        let best = w.detectRange;
-        for (const c of battle.crafts) { if (!c.alive || c.pilot.team === b.team) continue; const d = Math.hypot(c.x - b.x, c.y - b.y); if (d < best) { best = d; target = c; } }
-        if (target) { b.targetId = target.pilot.id; b.closestTargetDist = best; }
+        // Missiles from the same trigger pull prefer different targets, each the one closest to its own heading so the fan
+        // does not cross over; they double up only when nobody else is in range. A lone missile simply takes the nearest.
+        const taken = new Set(battle.bullets.filter(o => o !== b && !o.dead && o.salvo === b.salvo && o.targetId !== null).map(o => o.targetId));
+        let fresh = null, freshD = w.detectRange, freshScore = Infinity, any = null, anyD = w.detectRange;
+        for (const c of battle.crafts) {
+          if (!c.alive || c.pilot.team === b.team) continue; const d = Math.hypot(c.x - b.x, c.y - b.y);
+          if (d < anyD) { anyD = d; any = c; }
+          const score = b.group > 1 ? Math.abs(angleDiff(b.angle, Math.atan2(c.y - b.y, c.x - b.x))) * 1e4 + d : d;
+          if (d < w.detectRange && score < freshScore && !taken.has(c.pilot.id)) { freshScore = score; freshD = d; fresh = c; }
+        }
+        target = fresh || any;
+        if (target) { b.targetId = target.pilot.id; b.closestTargetDist = fresh ? freshD : anyD; }
       }
       if (!target) return;
       const targetDist = Math.hypot(target.x - b.x, target.y - b.y);
@@ -270,8 +346,10 @@
     }
 
     function handleWalls(b) {
-      if (b.x < b.r || b.x > ARENA_W - b.r) { if (b.bounces > 0) { b.vx *= -1; b.angle = Math.atan2(b.vy, b.vx); b.bounces--; b.x = clamp(b.x, b.r, ARENA_W - b.r); } else b.dead = true; }
-      if (b.y < b.r || b.y > ARENA_H - b.r) { if (b.bounces > 0) { b.vy *= -1; b.angle = Math.atan2(b.vy, b.vx); b.bounces--; b.y = clamp(b.y, b.r, ARENA_H - b.r); } else b.dead = true; }
+      // Pierce Lv3 leaves through one wall and comes back in through the opposite one.
+      if (b.wrap) { if (b.x < 0) b.x += ARENA_W; else if (b.x > ARENA_W) b.x -= ARENA_W; if (b.y < 0) b.y += ARENA_H; else if (b.y > ARENA_H) b.y -= ARENA_H; return; }
+      if (b.x < b.r || b.x > ARENA_W - b.r) { if (b.bounces > 0) { b.vx *= -1; b.angle = Math.atan2(b.vy, b.vx); b.bounces--; b.bounced++; b.x = clamp(b.x, b.r, ARENA_W - b.r); } else b.dead = true; }
+      if (b.y < b.r || b.y > ARENA_H - b.r) { if (b.bounces > 0) { b.vy *= -1; b.angle = Math.atan2(b.vy, b.vx); b.bounces--; b.bounced++; b.y = clamp(b.y, b.r, ARENA_H - b.r); } else b.dead = true; }
     }
 
     function updateLasers(battle, dt) {
@@ -279,7 +357,7 @@
         l.t -= dt;
         if (l.t <= 0 && !l.active) {
           l.active = true; l.t = .12; const dx = Math.cos(l.angle), dy = Math.sin(l.angle);
-          for (const c of battle.crafts) { if (!c.alive || c.pilot.team === l.team) continue; const rx = c.x - l.x, ry = c.y - l.y, along = rx * dx + ry * dy, perp = Math.abs(rx * dy - ry * dx); if (along > 0 && perp < c.r + 3) damageCraft(battle, c, 1, l.owner, l.salvo); }
+          for (const c of battle.crafts) { if (!c.alive || c.pilot.team === l.team) continue; const rx = c.x - l.x, ry = c.y - l.y, along = rx * dx + ry * dy, perp = Math.abs(rx * dy - ry * dx); if (along > 0 && perp < c.r + l.w) damageCraft(battle, c, 1, l.owner, l.salvo); }
         }
       }
       battle.lasers = battle.lasers.filter(l => l.t > 0);
@@ -298,7 +376,7 @@
       c.alive = false; c.hp = 0; emit(battle, 'kill', c);
       const killer = battle.crafts.find(x => x.pilot.id === attackerId);
       if (killer && killer !== c) { killer.kills++; killer.pilot.totalKills++; killer.pilot.money += CFG.rewards.kill; if (battle.bountyIds.has(c.pilot.id)) killer.pilot.money += CFG.rewards.bounty; }
-      c.pilot.weapon = 'basic'; c.pilot.item = null; c.pilot.itemCharges = 0; c.pilot.aliveLast = false;
+      c.pilot.weapon = 'basic'; c.pilot.weaponLevel = 1; c.pilot.item = null; c.pilot.itemCharges = 0; c.pilot.aliveLast = false;
       if (!CFG.rules.minesPersistAfterDeath) battle.mines = battle.mines.filter(m => m.owner !== c.pilot.id);
     }
 
@@ -357,7 +435,7 @@
       }
     }
 
-    return { createRun, advanceRound, autoBuy, buy, startBattle, step, findAimAssist };
+    return { createRun, advanceRound, autoBuy, buy, weaponOffer, itemOffer, weaponStats, startBattle, step, findAimAssist };
   }
 
   const api = { createCore };
