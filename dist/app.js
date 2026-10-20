@@ -157,10 +157,10 @@
     if(net.phase!=='battle'||!state.run)return;const run=state.run,me=localPilot(),now=performance.now();
     const before=net.base?predictSelf(now):null;
     [me.money,me.weapon,me.item,me.itemCharges,me.weaponLevel]=m.me;
-    state.battle={started:m.st,ended:m.en,timeLeft:m.tl,countdown:m.cd,bountyIds:new Set(m.bo),winnerIds:[],resultRows:[],
-      crafts:m.c.map((c,i)=>({pilot:run.pilots[i],alive:!!c.al,hidden:!!c.hid,sx:c.x,sy:c.y,x:c.x,y:c.y,vx:c.vx||0,vy:c.vy||0,angle:c.a||0,r:CFG.craft.radius,hp:c.hp||0,maxHp:run.settings.maxHp,shield:c.sh||0,cloak:c.ck?1:0,knocked:!!c.kn})),
+    state.battle={time:m.tm,snapTime:m.tm,started:m.st,ended:m.en,timeLeft:m.tl,countdown:m.cd,bountyIds:new Set(m.bo),winnerIds:[],resultRows:[],
+      crafts:m.c.map((c,i)=>({pilot:run.pilots[i],alive:!!c.al,hidden:!!c.hid,sx:c.x,sy:c.y,x:c.x,y:c.y,vx:c.vx||0,vy:c.vy||0,angle:c.a||0,r:CFG.craft.radius,hp:c.hp||0,maxHp:run.settings.maxHp,shield:c.sh||0,cloak:c.ck?1:0,knocked:!!c.kn,satReady:c.le||0})),
       bullets:m.b.map(([x,y,vx,vy,k,r,bounced,flags])=>({sx:x,sy:y,x,y,vx,vy,type:WEAPON_KEYS[k],r,bounced,blast:flags&1,wrap:!!(flags&2)})),
-      lasers:m.l.map(([x,y,angle,active,w])=>({x,y,angle,active:!!active,w})),
+      lasers:m.l.map(([x,y,angle,active,w,full])=>({x,y,angle,active:!!active,w,full:!!full})),
       mines:m.m.map(([x,y])=>({x,y,team:me.team}))};
     net.snapAt=now;m.ev.forEach(sparkEvent);rebasePrediction(m,now,before);
   }
@@ -201,13 +201,14 @@
     const age=b.started&&!b.ended?Math.min(.1,(performance.now()-net.snapAt)/1000):0;
     for(const c of b.crafts)if(c.alive&&!c.hidden){c.x=clamp(c.sx+c.vx*age,c.r,1200-c.r);c.y=clamp(c.sy+c.vy*age,c.r,800-c.r);}
     for(const s of b.bullets){s.x=s.sx+s.vx*age;s.y=s.sy+s.vy*age;}
+    b.time=b.snapTime+age;
     applyPrediction(dt);
     $('#countdown').textContent=b.started?'':b.countdown>0?Math.ceil(b.countdown):'FIGHT';
     if(b.started&&!b.ended)updateParticles(dt);updateHUD();
   }
 
   function draw(){ctx.fillStyle='#020304';ctx.fillRect(0,0,1200,800);drawGrid();const b=state.battle,me=localCraft();
-    if(me?.alive)drawAimAssist(me);for(const m of b.mines)drawMine(m);for(const l of b.lasers)drawLaser(l);for(const bullet of b.bullets)drawBullet(bullet);for(const c of b.crafts)if(c.alive)drawCraft(c);for(const r of state.rings){ctx.globalAlpha=clamp(r.t/.35,0,1);ctx.strokeStyle='#c8ff4b';ctx.lineWidth=2;ctx.beginPath();ctx.arc(r.x,r.y,r.r*(1.15-r.t/.35*.3),0,TAU);ctx.stroke();}for(const p of state.particles){ctx.globalAlpha=clamp(p.t*2,0,1);ctx.fillStyle=p.color;ctx.fillRect(p.x-2,p.y-2,4,4);}ctx.globalAlpha=1;
+    if(me?.alive)drawAimAssist(me);for(const m of b.mines)drawMine(m);for(const l of b.lasers)drawLaser(l);for(const bullet of b.bullets)drawBullet(bullet);for(const c of b.crafts)if(c.alive){drawCraft(c);drawSatellites(c,b);}for(const r of state.rings){ctx.globalAlpha=clamp(r.t/.35,0,1);ctx.strokeStyle='#c8ff4b';ctx.lineWidth=2;ctx.beginPath();ctx.arc(r.x,r.y,r.r*(1.15-r.t/.35*.3),0,TAU);ctx.stroke();}for(const p of state.particles){ctx.globalAlpha=clamp(p.t*2,0,1);ctx.fillStyle=p.color;ctx.fillRect(p.x-2,p.y-2,4,4);}ctx.globalAlpha=1;
     if(!me.alive){ctx.fillStyle='#0008';ctx.fillRect(0,0,1200,800);ctx.textAlign='center';ctx.fillStyle='#e9f0f2';ctx.font='700 28px Cascadia Mono, monospace';ctx.fillText('觀戰模式',600,380);ctx.fillStyle='#84919b';ctx.font='14px Cascadia Mono, monospace';ctx.fillText('等待本場結束',600,410);}
   }
   function drawGrid(){ctx.strokeStyle='#0d1519';ctx.lineWidth=1;for(let x=40;x<1200;x+=40){ctx.beginPath();ctx.moveTo(x,0);ctx.lineTo(x,800);ctx.stroke();}for(let y=40;y<800;y+=40){ctx.beginPath();ctx.moveTo(0,y);ctx.lineTo(1200,y);ctx.stroke();}ctx.strokeStyle='#263039';ctx.lineWidth=3;ctx.strokeRect(2,2,1196,796);}
@@ -216,13 +217,16 @@
     ctx.textAlign='center';ctx.font='10px Cascadia Mono, monospace';ctx.fillStyle='#84919b';ctx.fillText(c.pilot.name,c.x,c.y+36);if(state.battle.bountyIds.has(c.pilot.id)){ctx.fillStyle='#ffd34d';ctx.font='17px sans-serif';ctx.fillText('♛',c.x,c.y-27);}for(let i=0;i<c.hp;i++){ctx.fillStyle=c.pilot.color;ctx.fillRect(c.x-(c.maxHp*7)/2+i*7,c.y+24,5,2);}
     // Weapon level next to the health bar, so opponents can tell an upgraded craft from afar.
     const lv=c.pilot.weaponLevel||1;if(lv>1){ctx.fillStyle='#c8ff4b';ctx.font='700 11px Cascadia Mono, monospace';ctx.textAlign='left';ctx.fillText(LEVEL_MARK[lv-1],c.x+(c.maxHp*7)/2+4,c.y+29);}}
+  function drawSatellites(c,b){if(c.pilot.weapon!=='laser'||(c.cloak>0&&c.pilot.team!==localPilot().team))return;const n=Math.max(0,(c.pilot.weaponLevel||1)-1);if(!n)return;
+    const ready=c.satReady??(c.satellites||[]).filter(t=>t<=0).length;ctx.save();ctx.shadowColor='#ff5165';for(let i=0;i<n;i++){const a=b.time*2.5+i*TAU/n,x=c.x+Math.cos(a)*34,y=c.y+Math.sin(a)*34;ctx.globalAlpha=c.cloak>0?.3:1;ctx.shadowBlur=i<ready?12:0;ctx.fillStyle=i<ready?'#ff5165':'#3a1118';ctx.strokeStyle='#ff5165';ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(x,y,4.5,0,TAU);ctx.fill();ctx.stroke();}ctx.restore();}
   function drawBullet(b){const color=b.blast?'#c8ff4b':b.type==='heavy'?'#ff9d42':b.type==='homing'?'#41e7e1':b.type==='bounce'?BOUNCE_COLORS[Math.min(b.bounced||0,BOUNCE_COLORS.length-1)]:'#e9f0f2';
     // A wrapping bullet near an edge is also drawn where it is about to come back in.
     const spots=[[b.x,b.y]];if(b.wrap){const gx=b.x<30?1200:b.x>1170?-1200:0,gy=b.y<30?800:b.y>770?-800:0;if(gx)spots.push([b.x+gx,b.y]);if(gy)spots.push([b.x,b.y+gy]);}
     ctx.save();ctx.fillStyle=color;ctx.shadowColor=color;ctx.shadowBlur=b.type==='homing'||b.blast?16:10;for(const[x,y]of spots){ctx.beginPath();ctx.arc(x,y,b.r,0,TAU);ctx.fill();}ctx.restore();}
   function drawMine(m){const visible=m.team===localPilot().team&&CFG.rules.friendlyMinesVisible;if(!visible)return;ctx.save();ctx.translate(m.x,m.y);ctx.strokeStyle='#ff9d42';ctx.globalAlpha=.65;ctx.setLineDash([3,4]);ctx.beginPath();ctx.arc(0,0,12,0,TAU);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle='#ff9d42';ctx.fillRect(-2,-2,4,4);ctx.restore();}
   // The warning shows the beam's real width, so players can see how far they need to move.
-  function drawLaser(l){const w=l.w||3;ctx.save();ctx.translate(l.x,l.y);ctx.rotate(l.angle);if(!l.active&&w>3){ctx.fillStyle='#ff5165';ctx.globalAlpha=.12;ctx.fillRect(0,-w,1500,w*2);}ctx.strokeStyle=l.active?'#fff':'#ff5165';ctx.lineWidth=l.active?Math.max(5,w*2):1;ctx.globalAlpha=l.active?1:.65;ctx.shadowColor='#ff5165';ctx.shadowBlur=l.active?25:8;ctx.beginPath();ctx.moveTo(0,0);ctx.lineTo(1500,0);ctx.stroke();ctx.restore();}
+  // The warning shows the beam's real width, so players can see how far they need to move. Summoned beams cross the whole arena.
+  function drawLaser(l){const w=l.w||3,from=l.full?-1500:0;ctx.save();ctx.translate(l.x,l.y);ctx.rotate(l.angle);if(!l.active&&w>3){ctx.fillStyle='#ff5165';ctx.globalAlpha=.12;ctx.fillRect(from,-w,1500-from,w*2);}ctx.strokeStyle=l.active?'#fff':'#ff5165';ctx.lineWidth=l.active?Math.max(5,w*2):1;ctx.globalAlpha=l.active?clamp((l.t??.15)/.15,.2,1):.65;ctx.shadowColor='#ff5165';ctx.shadowBlur=l.active?25:8;ctx.beginPath();ctx.moveTo(from,0);ctx.lineTo(1500,0);ctx.stroke();ctx.restore();}
 
   setupListeners();refreshSetup();
   // The multiplayer entry only appears when this page was served by the game server.

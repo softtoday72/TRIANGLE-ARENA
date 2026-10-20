@@ -32,8 +32,10 @@ globalThis.WEAPONS = Object.freeze({
              upgrade:[210, 280], levels:[{ shots:2 }, { bounces:Infinity, life:8, maxLive:6 }], levelDesc:['一次 2 發，V 字形', '反彈不限次數，場上最多 6 發'] },
   pierce:  { name:'穿透彈', price:450, desc:'穿過兩名目標｜間隔 1.4 秒', cooldown:1.4, speed:380, damage:1, strength:99, maxHits:2,
              upgrade:[270, 360], levels:[{ maxHits:Infinity }, { wrap:true }], levelDesc:['穿過所有機體', '穿越場地邊界'] },
-  laser:   { name:'雷射', price:700, desc:'0.5 秒預警｜間隔 2.7 秒', cooldown:2.7, damage:1, strength:0, halfWidth:3,
-             upgrade:[420, 560], levels:[{ halfWidth:8 }, { halfWidth:14 }], levelDesc:['光束加粗', '光束再加粗'] },
+  // Laser: the main beam hits the whole line through the craft (in front and behind) the instant it fires, no warning.
+  // Lv2 and Lv3 add satellites that orbit the craft and fire the same kind of beam at the nearest enemy in range by themselves.
+  laser:   { name:'雷射', price:700, desc:'瞬間貫穿整條直線｜間隔 1.3 秒', cooldown:1.3, damage:1, strength:0, halfWidth:8, satellites:0, satelliteCooldown:3, satelliteRange:500,
+             upgrade:[420, 560], levels:[{ satellites:1 }, { satellites:2 }], levelDesc:['加 1 個自動攻擊的衛星', '再加 1 個衛星（共 2 個）'] },
   split:   { name:'分裂彈', price:550, desc:'200px 後分裂｜間隔 1.45 秒', cooldown:1.45, speed:360, damage:1, strength:1, arc:60, fragments:5,
              upgrade:[330, 440], levels:[{ arc:180, fragments:10 }, { arc:360, fragments:18 }], levelDesc:['180 度、10 發', '360 度、18 發'] }
 });

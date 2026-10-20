@@ -99,10 +99,17 @@
       return Array.from({ length: n }, (_, i) => { const a = -Math.PI / 2 + i * TAU / n; return { x: cx + Math.cos(a) * rx, y: cy + Math.sin(a) * ry, a: a + Math.PI }; });
     }
 
+    // Laser satellites (Lv2+) start out of step with each other so they do not fire together.
+    function makeSatellites(p) {
+      if (p.weapon !== 'laser') return [];
+      const w = weaponStats('laser', p.weaponLevel);
+      return Array.from({ length: w.satellites }, (_, i) => 1 + i * w.satelliteCooldown / w.satellites);
+    }
+
     function startBattle(run) {
       const positions = spawnPositions(run.pilots.length);
       const battle = { settings: run.settings, crafts: [], bullets: [], mines: [], lasers: [], events: [], time: 0, timeLeft: CFG.arena.roundTime, started: false, ended: false, countdown: 3, survivalTick: CFG.rewards.survivalSeconds, bountyIds: new Set(), winnerIds: [], resultRows: [] };
-      battle.crafts = run.pilots.map((p, i) => ({ pilot: p, x: positions[i].x, y: positions[i].y, angle: quantize8(positions[i].a), vx: 0, vy: 0, r: CFG.craft.radius, hp: run.settings.maxHp, maxHp: run.settings.maxHp, alive: true, cooldown: .5 + random() * .5, shield: p.item === 'shield' ? p.itemCharges : 0, cloak: 0, kills: 0, survival: 0, lastAttacker: null, aiThink: 0, aiCommand: null, aiTargetId: null, aiTargetTime: 0, aiFireDelay: 0, aiShotDelay: 0, aiStallTime: 0, aiReposition: 0, orbitSign: random() < .5 ? -1 : 1, placedMines: 0, knockT: 0, kvx: 0, kvy: 0 }));
+      battle.crafts = run.pilots.map((p, i) => ({ pilot: p, x: positions[i].x, y: positions[i].y, angle: quantize8(positions[i].a), vx: 0, vy: 0, r: CFG.craft.radius, hp: run.settings.maxHp, maxHp: run.settings.maxHp, alive: true, cooldown: .5 + random() * .5, shield: p.item === 'shield' ? p.itemCharges : 0, cloak: 0, kills: 0, survival: 0, lastAttacker: null, aiThink: 0, aiCommand: null, aiTargetId: null, aiTargetTime: 0, aiFireDelay: 0, aiShotDelay: 0, aiStallTime: 0, aiReposition: 0, orbitSign: random() < .5 ? -1 : 1, placedMines: 0, knockT: 0, kvx: 0, kvy: 0, satellites: makeSatellites(p) }));
       return battle;
     }
 
@@ -121,6 +128,7 @@
         c.survival += dt; c.cooldown -= dt; if (c.cloak > 0) c.cloak = Math.max(0, c.cloak - dt);
         const cmd = c.pilot.human ? (commands[c.pilot.id] || IDLE) : aiCommand(battle, c, dt);
         applyCommand(battle, c, cmd, dt);
+        updateSatellites(battle, c, dt);
       }
       resolveCraftCollisions(battle.crafts); updateLasers(battle, dt); updateBullets(battle, dt); updateMines(battle); updateBounty(battle); checkEnd(battle);
       return true;
@@ -133,6 +141,7 @@
       const type = c.pilot.weapon, w = weaponStats(type, c.pilot.weaponLevel), dx = tx - c.x, dy = ty - c.y, cs = Math.cos(angle), sn = Math.sin(angle);
       const along = dx * cs + dy * sn, cross = Math.abs(dx * sn - dy * cs);
       if (type === 'homing') return along > 0 && Math.hypot(dx, dy) <= w.detectRange;
+      if (type === 'laser') return cross <= target.r + w.halfWidth + CFG.ai.laneMargin; // the beam also runs out behind the craft
       const bulletRadius = w.radius ?? 4, spread = type === 'triple' ? (w.barrels - 1) / 2 * BARREL_GAP : 0, beam = type === 'laser' ? w.halfWidth : bulletRadius;
       return along > 0 && cross <= target.r + beam + spread + CFG.ai.laneMargin;
     }
@@ -235,7 +244,7 @@
       const type = c.pilot.weapon, w = weaponStats(type, c.pilot.weaponLevel), assist = findAimAssist(battle, c), shotAngle = assist?.angle ?? c.angle;
       c.cooldown = w.cooldown; if (!c.pilot.human) c.aiShotDelay = w.cooldown + CFG.difficulty[battle.settings.difficulty].shotPause; if (c.cloak > 0) c.cloak = 0;
       const salvo = `${c.pilot.id}-${battle.time.toFixed(3)}`;
-      if (type === 'laser') { battle.lasers.push({ owner: c.pilot.id, team: c.pilot.team, x: c.x, y: c.y, angle: shotAngle, t: .5, active: false, salvo, w: w.halfWidth }); return; }
+      if (type === 'laser') { fireBeam(battle, c, c.x, c.y, shotAngle, w.halfWidth, salvo); return; }
       // Several shots per trigger pull fan out evenly around the aim (or sit side by side for the triple).
       const fan = (n, step) => Array.from({ length: n }, (_, i) => (i - (n - 1) / 2) * step);
       if (type === 'triple') fan(w.barrels, BARREL_GAP).forEach(offset => spawnBullet(battle, c, w, type, salvo, offset, shotAngle));
@@ -352,14 +361,39 @@
       if (b.y < b.r || b.y > ARENA_H - b.r) { if (b.bounces > 0) { b.vy *= -1; b.angle = Math.atan2(b.vy, b.vx); b.bounces--; b.bounced++; b.y = clamp(b.y, b.r, ARENA_H - b.r); } else b.dead = true; }
     }
 
-    function updateLasers(battle, dt) {
-      for (const l of battle.lasers) {
-        l.t -= dt;
-        if (l.t <= 0 && !l.active) {
-          l.active = true; l.t = .12; const dx = Math.cos(l.angle), dy = Math.sin(l.angle);
-          for (const c of battle.crafts) { if (!c.alive || c.pilot.team === l.team) continue; const rx = c.x - l.x, ry = c.y - l.y, along = rx * dx + ry * dy, perp = Math.abs(rx * dy - ry * dx); if (along > 0 && perp < c.r + l.w) damageCraft(battle, c, 1, l.owner, l.salvo); }
-        }
+    // Hits every enemy on the whole line through (x, y) at once, both ahead and behind; what is left in
+    // battle.lasers is only the flash for the client.
+    function fireBeam(battle, c, x, y, angle, halfWidth, salvo) {
+      const dx = Math.cos(angle), dy = Math.sin(angle);
+      for (const t of battle.crafts) if (t.alive && t.pilot.team !== c.pilot.team && Math.abs((t.x - x) * dy - (t.y - y) * dx) < t.r + halfWidth) damageCraft(battle, t, 1, c.pilot.id, salvo);
+      battle.lasers.push({ owner: c.pilot.id, team: c.pilot.team, x, y, angle, t: .15, active: true, full: true, w: halfWidth });
+    }
+
+    // Where satellite i of this craft is right now: two satellites sit opposite each other on a slow orbit.
+    function satellitePosition(battle, c, i, count) {
+      const a = battle.time * 2.5 + i * TAU / count;
+      return { x: c.x + Math.cos(a) * 34, y: c.y + Math.sin(a) * 34 };
+    }
+
+    // Each satellite fires at the nearest enemy within range whenever it is charged, preferring one its sibling
+    // did not just shoot. It holds fire while the craft is cloaked, since that would give the craft away.
+    function updateSatellites(battle, c, dt) {
+      if (c.pilot.weapon !== 'laser' || !c.satellites.length) return;
+      const w = weaponStats('laser', c.pilot.weaponLevel), n = c.satellites.length;
+      for (let i = 0; i < n; i++) {
+        c.satellites[i] -= dt;
+        if (c.satellites[i] > 0 || c.cloak > 0) continue;
+        const pos = satellitePosition(battle, c, i, n);
+        const options = battle.crafts.filter(t => t.alive && t.pilot.team !== c.pilot.team && t.cloak <= 0 && dist(pos, t) <= w.satelliteRange).sort((a, z) => dist(pos, a) - dist(pos, z));
+        const target = options.find(t => t.pilot.id !== c.lastSatelliteTarget) || options[0];
+        if (!target) continue;
+        fireBeam(battle, c, pos.x, pos.y, Math.atan2(target.y - pos.y, target.x - pos.x), w.halfWidth, `${c.pilot.id}-sat${i}-${battle.time.toFixed(3)}`);
+        c.satellites[i] = w.satelliteCooldown; c.lastSatelliteTarget = target.pilot.id;
       }
+    }
+
+    function updateLasers(battle, dt) {
+      for (const l of battle.lasers) l.t -= dt;
       battle.lasers = battle.lasers.filter(l => l.t > 0);
     }
 
