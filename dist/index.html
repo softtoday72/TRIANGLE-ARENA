@@ -79,9 +79,11 @@
       </div>
       <div id="onlineCard" class="control-card online-card" hidden>
         <span>多人連線 <b id="onlineStatus"></b></span>
-        <div id="onlineJoin" class="online-row">
-          <input id="playerName" type="text" maxlength="10" placeholder="你的名字" aria-label="玩家名稱" autocomplete="off">
-          <button id="joinRoom" class="ghost-btn" type="button">加入連線房間</button>
+        <div id="onlineBrowse">
+          <div class="online-row"><input id="playerName" type="text" maxlength="10" placeholder="你的名字" aria-label="玩家名稱" autocomplete="off"></div>
+          <div class="section-label"><span>ROOMS</span> 房間列表</div>
+          <div id="roomList" class="room-list"></div>
+          <div class="online-row"><input id="roomName" type="text" maxlength="16" placeholder="房間名稱（可留空，預設用你的名字）" aria-label="房間名稱" autocomplete="off"><button id="createRoom" class="ghost-btn" type="button">建立房間</button></div>
         </div>
         <div id="onlineRoom" hidden>
           <ul id="playerList" class="player-list"></ul>

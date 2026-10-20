@@ -17,7 +17,7 @@
   // localId is the pilot this browser controls; everything "mine" on screen is looked up through it.
   const state={screen:'setup',run:null,battle:null,localId:0,particles:[],rings:[],pendingSwitch:null,raf:0,last:0,resultTimer:0,paused:false,useItemQueued:false,keys:new Set()};
   // While net.room is set the server owns the run and the battle; this client only sends intent and draws what it is told.
-  const net={ws:null,room:null,phase:null,error:null,invite:[],sentInput:'',snapAt:0,tick:1/60,seq:0,inputs:[],base:null,ex:0,ey:0,angle:null};
+  const net={ws:null,room:null,phase:null,invite:[],rooms:null,serverUp:false,deadline:null,sentInput:'',snapAt:0,tick:1/60,seq:0,inputs:[],base:null,ex:0,ey:0,angle:null};
   const online=()=>!!net.room,isHost=()=>online()&&net.room.hostId===net.room.you;
   const netSend=m=>{if(net.ws&&net.ws.readyState===1)net.ws.send(JSON.stringify(m));};
   const localPilot=()=>state.run.pilots[state.localId], localCraft=()=>state.battle.crafts[state.localId];
@@ -35,8 +35,8 @@
     $('#cancelEnd').addEventListener('click',()=>$('#confirmModal').classList.remove('active'));$('#confirmEnd').addEventListener('click',()=>online()?leaveRoom():resetToSetup());
     $('#cancelSwitch').addEventListener('click',()=>{state.pendingSwitch=null;$('#switchModal').classList.remove('active');});
     $('#confirmSwitch').addEventListener('click',()=>{const k=state.pendingSwitch;state.pendingSwitch=null;$('#switchModal').classList.remove('active');if(k)sendBuy('weapon',k);});
-    $('#joinRoom').addEventListener('click',joinRoom);$('#leaveRoom').addEventListener('click',leaveRoom);$('#playerName').addEventListener('keydown',e=>{if(e.key==='Enter')joinRoom();});
-    window.addEventListener('keydown',e=>{if(e.target?.id==='playerName')return;if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code))e.preventDefault();state.keys.add(e.code);if(e.code==='Escape'&&state.screen==='gameScreen')togglePause();if(e.code==='KeyZ'){if(online()){if(net.phase==='battle')netSend({t:'item'});}else if(state.battle&&!state.paused)state.useItemQueued=true;}});
+    $('#createRoom').addEventListener('click',createRoom);$('#roomName').addEventListener('keydown',e=>{if(e.key==='Enter')createRoom();});$('#leaveRoom').addEventListener('click',leaveRoom);$('#playerName').addEventListener('change',()=>{try{localStorage.setItem('arenaName',$('#playerName').value);}catch{}});
+    window.addEventListener('keydown',e=>{if(e.target?.tagName==='INPUT'&&e.target.type==='text')return;if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code))e.preventDefault();state.keys.add(e.code);if(e.code==='Escape'&&state.screen==='gameScreen')togglePause();if(e.code==='KeyZ'){if(online()){if(net.phase==='battle')netSend({t:'item'});}else if(state.battle&&!state.paused)state.useItemQueued=true;}});
     window.addEventListener('keyup',e=>state.keys.delete(e.code));
     // An online fight cannot be paused, so losing focus just lets go of every key instead.
     window.addEventListener('blur',()=>{if(online()){state.keys.clear();if(net.phase==='battle')sendInput();}else if(state.screen==='gameScreen'&&!state.paused)pause();});
@@ -65,6 +65,10 @@
   function openShop(){core.autoBuy(state.run);renderShop();show('shopScreen');}
   function readyCount(){const ps=net.room.players;return `(${ps.filter(p=>p.ready).length}/${ps.length})`;}
   function iAmReady(){return !!net.room.players.find(p=>p.cid===net.room.you)?.ready;}
+  // The server moves on by itself when the countdown runs out, so stragglers cannot hold the room up.
+  function countdownText(){return net.deadline===null?'':` · ${Math.max(0,Math.ceil((net.deadline-performance.now())/1000))} 秒`;}
+  function shopButton(){const waiting=online()&&iAmReady();$('#startRound').disabled=waiting;$('#startRound').innerHTML=!online()?'部署並開戰 <span>→</span>':waiting?`等待其他玩家 ${readyCount()}${countdownText()}`:`準備完成 ${readyCount()}${countdownText()} <span>→</span>`;}
+  function resultButton(){const done=!state.run.infinite&&state.run.round>=state.run.maxRounds,waiting=online()&&iAmReady();$('#continueRun').disabled=waiting;$('#continueRun').innerHTML=waiting?`等待其他玩家 ${readyCount()}${countdownText()}`:`${done?'查看本輪總結':'前往下一場'}${online()?' '+readyCount()+countdownText():''} <span>→</span>`;}
   function renderShop(){
     const run=state.run,p=localPilot(),total=run.infinite?'∞':String(run.maxRounds).padStart(2,'0');
     $('#shopRoundLabel').textContent=`ROUND ${String(run.round).padStart(2,'0')} / ${total}`;$('#shopMoney').textContent=p.money;$('#heldWeapon').textContent=weaponLabel(p);$('#heldItem').textContent=p.item?`${ITEMS[p.item].name} × ${p.itemCharges}`:'—';$('#recordText').textContent=`${p.wins} 勝 · ${p.totalKills} 擊殺`;
@@ -74,8 +78,8 @@
     $('#weaponShop').innerHTML=weapons.map(([k,o])=>weaponCard(k,o,p)).join('');
     $('#itemShop').innerHTML=Object.keys(ITEMS).map(k=>itemCard(k,core.itemOffer(p,k),p)).join('');
     $$('.shop-card button').forEach(b=>b.addEventListener('click',()=>buy(b.dataset.type,b.dataset.key)));
-    const waiting=online()&&iAmReady();$('#startRound').disabled=waiting;
-    $('#startRound').innerHTML=!online()?'部署並開戰 <span>→</span>':waiting?`等待其他玩家 ${readyCount()}`:`準備完成 ${readyCount()} <span>→</span>`;
+    shopButton();
+
   }
   function weaponCard(k,o,p){const v=W[k],held=o.kind!=='buy',next=o.kind==='upgrade'?`升級 Lv${o.level}：${v.levelDesc[o.level-2]}`:o.kind==='max'?'已達最高等級':v.desc;
     const label=o.kind==='max'?'已滿級':o.kind==='upgrade'?`升級 $${o.price}`:'$'+o.price;
@@ -104,34 +108,52 @@
   function updateParticles(dt){for(const p of state.particles){p.t-=dt;p.x+=p.vx*dt;p.y+=p.vy*dt;p.vx*=.97;p.vy*=.97;}state.particles=state.particles.filter(p=>p.t>0);for(const r of state.rings)r.t-=dt;state.rings=state.rings.filter(r=>r.t>0);}
   function renderResults(){const b=state.battle,p=localPilot(),winners=b.winnerIds.map(id=>state.run.pilots[id].name);$('#winnerBadge').textContent=`勝者 ${winners.join(' / ')}`;const pr=b.resultRows.find(r=>r.c.pilot.id===state.localId);$('#payoutSummary').innerHTML=`<div><small>擊殺獎金</small><b>+$${pr.killPay}</b></div><div><small>存活獎金</small><b>+$${pr.survivePay}</b></div><div><small>${pr.win?'勝方獎勵':'輸方補償'}</small><b>+$${pr.outcome}</b></div><div><small>目前資金</small><b>$${p.money}</b></div>`;
     const rows=[...b.resultRows].sort((a,z)=>(+z.win-+a.win)||(z.c.kills-a.c.kills)||(z.c.survival-a.c.survival));$('#scoreBody').innerHTML=rows.map((r,i)=>`<tr class="${r.c.pilot.id===state.localId?'player-row':''}"><td>${String(i+1).padStart(2,'0')}</td><td><span class="pilot-cell"><i class="color-dot" style="background:${r.c.pilot.color}"></i>${esc(r.c.pilot.name)}</span></td><td>${r.c.kills}</td><td>${r.c.survival.toFixed(1)}s</td><td>$${r.killPay}</td><td>$${r.survivePay}</td><td>${r.win?'勝利':'補償'} +$${r.outcome}</td><td class="money-cell">+$${r.total}</td></tr>`).join('');
-    const done=!state.run.infinite&&state.run.round>=state.run.maxRounds,waiting=online()&&iAmReady();$('#continueRun').disabled=waiting;
-    $('#continueRun').innerHTML=waiting?`等待其他玩家 ${readyCount()}`:`${done?'查看本輪總結':'前往下一場'}${online()?' '+readyCount():''} <span>→</span>`;
+    resultButton();
+
   }
   function nextRound(){if(!core.advanceRound(state.run)){showFinal();return;}openShop();}
   function showFinal(){const p=localPilot(),rank=[...state.run.pilots].sort((a,b)=>b.wins-a.wins||b.totalKills-a.totalKills).findIndex(x=>x.id===state.localId)+1;$('#finalStats').innerHTML=`<div><small>最終排名</small><b>#${rank}</b></div><div><small>勝場</small><b>${p.wins}</b></div><div><small>總擊殺</small><b>${p.totalKills}</b></div><div><small>剩餘資金</small><b>$${p.money}</b></div>`;show('finalScreen');}
   function updateHUD(){const b=state.battle;if(!b)return;const p=localCraft();$('#hudRound').textContent=`ROUND ${String(state.run.round).padStart(2,'0')}`;$('#hudAlive').textContent=`${b.crafts.filter(c=>c.alive).length} ALIVE`;$('#hudTimer').textContent=fmtTime(b.timeLeft);$('#hudMoney').textContent=p.pilot.money;$('#hudWeapon').textContent=weaponLabel(p.pilot);$('#hudItem').textContent=p.pilot.item?`${ITEMS[p.pilot.item].name} × ${p.pilot.itemCharges}`:'—';$('#hudHealth').innerHTML=Array.from({length:p.maxHp},(_,i)=>`<i class="${i<p.hp?'':'empty'}"></i>`).join('');}
-  function pause(){const on=online();if(!on)state.paused=true;$('#pauseKicker').textContent=on?'MATCH STILL RUNNING':'SYSTEM PAUSED';$('#pauseTitle').textContent=on?'選單':'暫停';$('#endGame').textContent=on?'離開房間':'結束本輪';$('#confirmTitle').textContent=on?'確定離開房間？':'確定結束本輪？';$('#confirmText').textContent=on?'你的機體會交給 AI 接手，這一輪無法再加入。':'目前資金、裝備與戰績都會清空。';$('#confirmEnd').textContent=on?'確定離開':'確定結束';$('#pauseModal').classList.add('active');}
+  function pause(){const on=online();if(!on)state.paused=true;$('#pauseKicker').textContent=on?'MATCH STILL RUNNING':'SYSTEM PAUSED';$('#pauseTitle').textContent=on?'選單':'暫停';$('#endGame').textContent=on?'離開房間':'結束本輪';$('#confirmTitle').textContent=on?'確定離開房間？':'確定結束本輪？';$('#confirmText').textContent=on?'你的機體會交給 AI 接手。之後可以從房間列表再加入，但會接手錢最少的那台。':'目前資金、裝備與戰績都會清空。';$('#confirmEnd').textContent=on?'確定離開':'確定結束';$('#pauseModal').classList.add('active');}
   function resume(){state.paused=false;$('#pauseModal').classList.remove('active');state.last=performance.now();canvas.focus();}
   function togglePause(){$('#pauseModal').classList.contains('active')?resume():pause();}
   function resetToSetup(){cancelAnimationFrame(state.raf);clearTimeout(state.resultTimer);state.battle=null;state.keys.clear();state.paused=false;$('#pauseModal').classList.remove('active');$('#confirmModal').classList.remove('active');show('setupScreen');}
 
   // ---- online mode ----
 
-  function joinRoom(){
-    if(net.ws)return;$('#onlineNote').textContent='連線中…';net.error=null;
+  // The page keeps one connection to the server while it is up: outside a room it shows the room list,
+  // inside a room it carries the game. If it drops, the client keeps trying to reconnect.
+  function connectServer(){
+    if(net.ws)return;
     const ws=net.ws=new WebSocket(`${location.protocol==='https:'?'wss':'ws'}://${location.host}/ws`);
-    ws.onopen=()=>netSend({t:'join',name:$('#playerName').value});
-    ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.t==='s')onSnapshot(m);else if(m.t==='room')onRoom(m);else if(m.t==='error')net.error=m.msg;};
-    ws.onclose=()=>{if(net.ws!==ws)return;const wasInRoom=online();net.ws=null;backToOffline(net.error||(wasInRoom?'與伺服器的連線中斷，已回到單機模式。':'無法連線到伺服器。'));};
+    ws.onmessage=e=>{const m=JSON.parse(e.data);if(m.t==='s')onSnapshot(m);else if(m.t==='room')onRoom(m);else if(m.t==='rooms'){net.rooms=m.rooms;net.maxRooms=m.max;if(!online())renderRoomList();}else if(m.t==='error'){if(online())backToBrowse(m.msg);else $('#onlineNote').textContent=m.msg;}};
+    ws.onclose=()=>{if(net.ws!==ws)return;net.ws=null;net.rooms=null;const wasInRoom=online();backToBrowse(wasInRoom?'與伺服器的連線中斷了，正在重新連線…':'');renderRoomList();setTimeout(connectServer,3000);};
   }
-  function leaveRoom(){const ws=net.ws;net.ws=null;if(ws)ws.close();backToOffline('');}
-  function backToOffline(note){const wasInRoom=online();net.room=null;net.phase=null;if(wasInRoom||state.screen!=='setupScreen')resetToSetup();refreshSetup();$('#onlineNote').textContent=note;}
+  function playerName(){return $('#playerName').value.trim();}
+  function createRoom(){if(!net.ws||online())return;$('#onlineNote').textContent='';netSend({t:'create',name:playerName(),roomName:$('#roomName').value});}
+  function joinRoom(id){if(!net.ws||online())return;$('#onlineNote').textContent='';netSend({t:'join',name:playerName(),roomId:id});}
+  function leaveRoom(){netSend({t:'leave'});backToBrowse('');}
+  function backToBrowse(note){const wasInRoom=online();net.room=null;net.phase=null;net.deadline=null;if(wasInRoom||state.screen!=='setupScreen')resetToSetup();refreshSetup();renderRoomList();$('#onlineNote').textContent=note;}
+  const PHASES={lobby:'等待中',shop:'商店',battle:'對戰中',result:'結算',final:'結算'};
+  function renderRoomList(){
+    const list=$('#roomList');if(!list||online())return;
+    if(net.rooms===null){$('#onlineStatus').textContent='';list.replaceChildren(Object.assign(document.createElement('small'),{textContent:net.serverUp?'正在連線到伺服器…':''}));return;}
+    $('#onlineStatus').textContent=`${net.rooms.length} 間房`;
+    if(!net.rooms.length){list.replaceChildren(Object.assign(document.createElement('small'),{textContent:'目前沒有房間，建立一個吧。'}));return;}
+    list.replaceChildren(...net.rooms.map(r=>{
+      const row=document.createElement('button'),cell=(tag,text,cls)=>{const e=document.createElement(tag);e.textContent=text;if(cls)e.className=cls;return e;};
+      const status=r.phase==='lobby'?'等待中':`第 ${r.round}/${r.maxRounds??'∞'} 場・${PHASES[r.phase]}`;
+      const action=r.phase==='lobby'?(r.joinable?'加入':'已滿'):(r.joinable?`接手 AI（${r.aiSeats}）`:'沒有空位');
+      row.type='button';row.className='room-row'+(r.phase==='lobby'?'':' busy');row.disabled=!r.joinable;
+      row.append(cell('b',r.name),cell('span','房主 '+r.host),cell('span',status),cell('span',`${r.humans}/${r.crafts}`,'count'),cell('em',action));
+      row.addEventListener('click',()=>joinRoom(r.id));return row;}));
+  }
   function renderLobby(){
-    const r=net.room;$('#onlineJoin').hidden=!!r;$('#onlineRoom').hidden=!r;$('#onlineStatus').textContent=r?`${r.players.length} 人`:'';if(!r)return;
+    const r=net.room;$('#onlineBrowse').hidden=!!r;$('#onlineRoom').hidden=!r;if(!r)return;$('#onlineStatus').textContent=`${r.name} · ${r.players.length} 人`;
     $('#playerList').replaceChildren(...r.players.map(p=>{const li=document.createElement('li');li.textContent=p.name;if(p.cid===r.you)li.className='me';if(p.cid===r.hostId){const em=document.createElement('em');em.textContent='房主';li.append(em);}return li;}));
     // Friends need nothing but a link; show the ones that actually reach this server from another machine.
     $('#inviteList').replaceChildren(...(net.invite.length?net.invite:[location.origin]).map(url=>{const row=document.createElement('div'),box=document.createElement('input'),btn=document.createElement('button');row.className='online-row';box.type='text';box.readOnly=true;box.value=url;box.setAttribute('aria-label','邀請網址');box.addEventListener('focus',()=>box.select());btn.type='button';btn.className='ghost-btn';btn.textContent='複製';btn.addEventListener('click',()=>copyInvite(box,btn));row.append(box,btn);return row;}));
-    $('#onlineHint').textContent=isHost()?'把邀請網址傳給朋友，對方用瀏覽器打開後按「加入連線房間」。人到齊後按「開始連線對戰」。':'等待房主設定並開始。';$('#onlineNote').textContent='';
+    $('#onlineHint').textContent=isHost()?'把邀請網址傳給朋友，對方打開後在房間列表點這一間。人到齊後按「開始連線對戰」。':'等待房主設定並開始。';$('#onlineNote').textContent='';
   }
   function copyInvite(box,btn){
     const done=()=>{btn.textContent='已複製';setTimeout(()=>btn.textContent='複製',1500);};
@@ -139,7 +161,7 @@
     if(navigator.clipboard)navigator.clipboard.writeText(box.value).then(done,()=>box.select());else{box.select();if(document.execCommand('copy'))done();}
   }
   function onRoom(m){
-    const prev=net.phase;net.room=m;net.phase=m.phase;net.tick=1/m.hz;
+    const prev=net.phase;net.room=m;net.phase=m.phase;net.tick=1/m.hz;net.deadline=m.left===null||m.left===undefined?null:performance.now()+m.left;
     if(m.run){m.run.maxRounds=m.run.infinite?Infinity:m.run.maxRounds;state.run=m.run;state.localId=m.pilotId;state.run.pilots.forEach(p=>p.color=pickColor(p.id));}
     if(m.phase==='lobby'){
       // A finished run leaves its summary on screen until the player dismisses it.
@@ -147,8 +169,9 @@
     }else if(m.phase==='shop'){renderShop();if(state.screen!=='shopScreen')show('shopScreen');}
     else if(m.phase==='battle'){if(prev!=='battle')beginOnlineBattle();}
     else if(m.phase==='result'){
+      if(!state.battle)state.battle={crafts:[],bullets:[],lasers:[],mines:[],bountyIds:new Set()};
       state.battle.winnerIds=m.result.winnerIds;state.battle.resultRows=m.result.rows.map(r=>({...r,c:{pilot:state.run.pilots[r.id],kills:r.kills,survival:r.survival}}));
-      if(prev!=='result')state.resultTimer=setTimeout(()=>{renderResults();show('resultScreen');},850);else if(state.screen==='resultScreen')renderResults();
+      if(prev===null){renderResults();show('resultScreen');}else if(prev!=='result')state.resultTimer=setTimeout(()=>{renderResults();show('resultScreen');},850);else if(state.screen==='resultScreen')renderResults();
     }else if(m.phase==='final')showFinal();
   }
   function beginOnlineBattle(){state.battle=null;state.particles=[];state.rings=[];net.sentInput='';net.seq=0;net.inputs=[{s:0,vx:0,vy:0,t:performance.now()}];net.base=null;net.ex=net.ey=0;net.angle=null;state.paused=false;$('#pauseModal').classList.remove('active');$('#countdown').textContent='';show('gameScreen');canvas.focus();state.last=performance.now();cancelAnimationFrame(state.raf);state.raf=requestAnimationFrame(loop);}
@@ -230,5 +253,6 @@
 
   setupListeners();refreshSetup();
   // The multiplayer entry only appears when this page was served by the game server.
-  fetch('api/status').then(r=>r.ok?r.json():null).then(s=>{if(s?.ok){net.invite=s.lan||[];$('#onlineCard').hidden=false;}}).catch(()=>{});
+  try{$('#playerName').value=localStorage.getItem('arenaName')||'';}catch{}
+  fetch('api/status').then(r=>r.ok?r.json():null).then(s=>{if(s?.ok){net.invite=s.lan||[];net.serverUp=true;$('#onlineCard').hidden=false;renderRoomList();connectServer();setInterval(()=>{if(!online())return;if(net.phase==='shop'&&state.screen==='shopScreen')shopButton();else if(net.phase==='result'&&state.screen==='resultScreen')resultButton();},500);}}).catch(()=>{});
 })();
